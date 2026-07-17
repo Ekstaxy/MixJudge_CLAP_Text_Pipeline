@@ -1,0 +1,6 @@
+audio/*
+Full_Group_Convos/
+*.parquet
+*.csv
+Notes.txt
+outputs/*
