@@ -9,10 +9,19 @@ MixAssist 標記 pipeline (Phase 2a)。
   outputs/labeled_turns.csv         標註結果 (一個 problem 一列,一 turn 可多列)
   outputs/labeled_turns_raw.jsonl   每個 turn 的原始 LLM 回覆 (debug 用)
 
+本地 GPU 推論版 (V100 32GB+):
+  - V100 不支援 bfloat16,一律用 float16 計算。
+  - 31B 模型 fp16 約需 62GB VRAM,放不進 36GB,因此預設 4-bit NF4 量化 (~18GB)。
+  - 可用 --precision 強制指定: 4bit / 8bit / fp16 / auto (預設 auto,依 VRAM 自動選)。
+
 用法:
   python src/labeling.py --splits train --limit 5       # 測試: 只標 train 前 5 個 turn
   python src/labeling.py                                # 全量: train + validation + test
   python src/labeling.py --splits validation test       # 指定 split
+  python src/labeling.py --precision 4bit               # 強制 4-bit 量化
+
+需要套件:
+  pip install -U transformers torch accelerate bitsandbytes
 
 中斷後重跑會自動跳過已標過的 turn (增量寫入)。
 """
@@ -23,13 +32,13 @@ import csv
 import json
 import re
 import sys
-import time
 from pathlib import Path
 
-from huggingface_hub import InferenceClient
+import torch
+from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig
 
 # ====================== 設定 ======================
-HF_TOKEN = "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"  # <-- Hugging Face token
+HF_TOKEN = ""  # <-- Hugging Face token (模型下載用,已下載過可留空)
 MODEL_ID = "google/gemma-4-31B-it"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,8 +49,7 @@ SPLIT_FILES = {
 }
 DEFAULT_OUTPUT = PROJECT_ROOT / "outputs" / "labeled_turns.csv"
 
-SLEEP_BETWEEN_CALLS = 2   # 秒,防 rate limit
-SLEEP_ON_ERROR = 10
+MAX_NEW_TOKENS = 1024
 MAX_HISTORY_MESSAGES = 4  # 帶給 LLM 的 input_history 上限 (4 = 前兩個完整對話)
 
 # 特殊 turn 的固定句
@@ -361,17 +369,75 @@ def extract_json(text: str) -> dict:
         raise
 
 
-def call_llm(client: InferenceClient, system_prompt: str, user_message: str) -> str:
-    response = client.chat_completion(
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        max_tokens=1024,
+def pick_precision(requested: str) -> str:
+    """依 VRAM 決定精度。V100 36GB: 31B fp16 放不下,預設 4bit。"""
+    if requested != "auto":
+        return requested
+    if not torch.cuda.is_available():
+        sys.exit("找不到 CUDA GPU。請確認 torch 有裝 CUDA 版且 GPU 可用。")
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    # 31B 參數: fp16 ~62GB, 8bit ~31GB, 4bit ~18GB (皆不含 KV cache)
+    if total_gb >= 70:
+        return "fp16"
+    if total_gb >= 40:
+        return "8bit"
+    return "4bit"
+
+
+def load_model(precision: str):
+    """載入本地模型。V100 (compute 7.0) 不支援 bf16,計算一律 float16。"""
+    kwargs = {"device_map": "auto", "low_cpu_mem_usage": True}
+    if HF_TOKEN:
+        kwargs["token"] = HF_TOKEN
+
+    if precision == "4bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+    elif precision == "8bit":
+        kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    else:  # fp16
+        kwargs["dtype"] = torch.float16
+
+    print(f"載入模型 {MODEL_ID} (precision={precision}),第一次會下載權重,請稍候...")
+    processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN or None)
+    model = AutoModelForMultimodalLM.from_pretrained(MODEL_ID, **kwargs)
+    model.eval()
+    print("模型載入完成。")
+    return processor, model
+
+
+@torch.inference_mode()
+def call_llm(processor, model, system_prompt: str, user_message: str) -> str:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+        enable_thinking=False,
+    ).to(model.device)
+    input_len = inputs["input_ids"].shape[-1]
+
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=MAX_NEW_TOKENS,
+        do_sample=True,
         temperature=1.0,  # Gemma 4 官方建議
         top_p=0.95,
+        top_k=64,
     )
-    return response.choices[0].message.content
+    reply = processor.decode(outputs[0][input_len:], skip_special_tokens=True)
+    # 去掉 Gemma 4 的空 thought 區塊 (<|channel>thought ... <channel|>)
+    reply = re.sub(r"<\|channel>thought\s*.*?<channel\|>", "", reply, flags=re.DOTALL)
+    return reply.strip()
 
 
 def normalize_dimension(value) -> str:
@@ -494,10 +560,13 @@ def main() -> None:
         default=DEFAULT_OUTPUT,
         help=f"輸出 CSV 路徑 (預設 {DEFAULT_OUTPUT})",
     )
+    parser.add_argument(
+        "--precision",
+        choices=["auto", "4bit", "8bit", "fp16"],
+        default="auto",
+        help="模型精度 (預設 auto: 依 VRAM 自動選,36GB V100 會選 4bit)",
+    )
     args = parser.parse_args()
-
-    if not HF_TOKEN:
-        sys.exit("請先在 HF_TOKEN 填入你的 Hugging Face token!")
 
     system_prompt = SYSTEM_PROMPT.strip()
     if not system_prompt:
@@ -512,7 +581,8 @@ def main() -> None:
     if done:
         print(f"偵測到既有輸出,已完成 {len(done)} 個 turn,將跳過。")
 
-    client = InferenceClient(model=MODEL_ID, api_key=HF_TOKEN)
+    precision = pick_precision(args.precision)
+    processor, model = load_model(precision)
     failures = []
 
     for split in args.splits:
@@ -528,7 +598,7 @@ def main() -> None:
 
             user_message = build_user_message(row)
             try:
-                raw_reply = call_llm(client, system_prompt, user_message)
+                raw_reply = call_llm(processor, model, system_prompt, user_message)
                 parsed = extract_json(raw_reply)
                 labels = parsed.get("labels", [])
                 if not isinstance(labels, list):
@@ -541,13 +611,11 @@ def main() -> None:
                 )
                 dims = [r["problem_dimension"] for r in out_rows]
                 print(f"{tag} -> {len(out_rows)} label(s): {dims}")
-                time.sleep(SLEEP_BETWEEN_CALLS)
             except Exception as e:
                 print(f"{tag} -> 錯誤: {e}")
                 failures.append((key, str(e)))
                 append_rows(output_csv, [error_row(row, str(e))])
                 append_raw(raw_jsonl, {"key": list(key), "error": str(e)})
-                time.sleep(SLEEP_ON_ERROR)
 
     print(f"\n完成。輸出: {output_csv}")
     print(f"原始回覆: {raw_jsonl}")
