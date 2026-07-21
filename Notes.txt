@@ -1,0 +1,84 @@
+Data of the MixAssist Dataset
+total rows        : 340
+has_content True  : 241
+has_content False : 99
+
+https://claude.ai/code/artifact/53a16e43-ac8c-48d2-a0cf-9aae23499224?org=1581471b-88de-48fc-8fec-2ec16835a191
+
+Process Flow:
+1. Labeling with 9 categories and corresponding recipes, should have split problem state and fix state, brief reasoning, 
+2. 
+
+記得我只要針對 problem axis 去做 validation 即可，也就是 L2
+
+what need
+problem text + corresponding audio
+and if could separate or label stem or mix
+generate same style of text
+
+我生成的對話需要像一般 mixing session 一樣，阿需要一堆廢話嗎還是就精準？或是取得一個中間值？
+這個不就等於是 style transfer？
+
+MixAssist Study:
+What I got:
+Text CSV with corresponding audio file
+Original audio file
+Which topic according to the audio -> could be turn to which problem statement
+Some of the description from the raw_amateur may not be useful since it just talks about what's the idea of his mixing
+There are questions such as : "Maybe we could ..."
+What I miss now:
+Maybe the DAW log (but it is intentionally removed according to the paper)
+
+What I should validate for retrieval:
+What I retrieval should from my original mixing turn
+The problem label is align to the retrieval
+I don't need to prove what already exists
+
+Labeling of Fix Side:
+increase level
+lower level
+有些 label 為 false 的不可忽略，如果可以看到前情提要的話，其實可以再組一個 data
+Please analyze this audio segment 有被加在 amateur
+I need more information before I can respond. Please elaborate. 有被加在 expert
+如果遇到上述兩項，要去研究前情提要或上一個對話
+Drums 的 room/amb/overhead 要被歸類為 level but not reverb
+
+My thoughts of retrieval:
+Use better LLM with a better prompting
+
+My thoughts of validation:
+Use LLM to do A/B testing to compare mine with Jason, for the same problem statement label, pick each 5 retrieval and let LLM to judge.
+Use a strong LLM that is stronger then the retrieval LLM to let it judge if the retrieval is valid
+Use manual hard work to check
+Use lexical heuristics
+
+
+1. I need to only get the data with has_problem = TRUE (Not really now)
+2. I need to accompany with the corresponding audio
+3. should label 9 problem statement retrieval key for labeling
+4. The corresponding problem and fix only comes from the same turn
+5. It could have plenty description of the problem from one mixing turn, it also may have plenty fix description from one mixing turn.
+6. Should have a method to determine whether the retrieval is useful or not. Perhaps by a LLM judge? or metrix?
+7. Should verify that the retrieval pool is relevant to each actual key (could by audio or some, how to?)
+
+1. Content Preservation (內容保留度驗證)
+風格轉了，但原始的混音問題有被正確保留嗎？
+
+作法 (Reverse Classification)： 把轉換後的一大堆「華麗對話」丟給另一個獨立的 LLM（或你訓練好的分類器），請它重新標註這段對話的 Problem Axis。
+
+證明邏輯： 
+如果你把 "this drum is too loud" 轉成一段 50 字的錄音室對話，
+而評估器依然能準確將其標記為 [Axis: Level, Dim: too_loud]，
+這就證明你的轉換成功保留了核心語意 (L2 Label)， 
+沒有因為加了「廢話」而失真。
+
+2. Style Strength (風格強度與自然度驗證)
+你生成的內容，真的像專業的混音溝通嗎？
+
+LLM-as-a-Judge 評分： 寫一個嚴格的 Prompt，請 LLM 比較「轉換前的單調句子」與「轉換後的對話」。設定 1~5 分的量表，針對 Professionalism (專業度) 與 Conversational Naturalness (對話自然度) 進行盲測打分。
+
+Lexical Overlap (詞彙重疊率)： 計算生成的文本與真實 MixAssist Dataset 之間的特定混音術語（如 fader, transient, LUFS, masking）出現頻率的分佈差異。
+如果分佈曲線拉近了，就代表風格成功轉移。
+
+Human Evaluation (人類專家盲測)： 這是最無懈可擊的證明。你可以直接把這些生成的對話與真實對話混在一起，讓台大數位創作音樂社裡有混音經驗的學生進行盲測 (A/B Test)。
+請這些具備實務背景的人來評分哪一段對話聽起來更像真實的錄音室溝通。如果生成的對話能拿到接近真實對話的分數，你的驗證就徹底完整了。

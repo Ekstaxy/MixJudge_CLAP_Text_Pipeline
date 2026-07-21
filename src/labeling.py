@@ -3,7 +3,7 @@
 MixAssist 標記 pipeline (Phase 2a)。
 
 對 train / validation / test 每個 turn 用 Gemma 4 31B 標註:
-  problem / fix / 15 dimensions (8 axes x 2 方向,phase 除外) + none。
+  problem / fix / 8 axes x signed dimensions + phase + none。
 
 輸出 (仿 problem_fix_gold_pairs.csv 作法,單一檔案用 split 欄區分):
   outputs/labeled_turns.csv         標註結果 (一個 problem 一列,一 turn 可多列)
@@ -62,43 +62,48 @@ MAX_HISTORY_MESSAGES = 8  # 帶給 LLM 的 input_history 上限 (4 = 前兩個�
 PLACEHOLDER_USER = "Please analyze this audio segment."
 PLACEHOLDER_ASSISTANT = "I need more information before I can respond. Please elaborate."
 
-# 8 axes x 2 方向 (phase 不分方向) = 15 dimensions + none
-# axis 欄位由 dimension 反查 (DIMENSION_TO_AXIS),LLM 只需要標 dimension
+# 8 axes; LLM 只標 problem_dimension, problem_axis 由 code 反查
+# 參考框架: level, body, brightness, space, dynamic, masking, stereo, phase
 DIMENSION_TO_AXIS = {
-    "level_low": "level",         # Stem too quiet — buried, can't hear it
-    "level_high": "level",        # Stem too loud — dominant, overpowering
-    "mud_high": "mud",            # Too much low-mid — thick, cloudy, boomy
-    "mud_low": "mud",             # Too little low-mid — thin, hollow, no body
-    "harsh_high": "harshness",    # Too harsh/bright — piercing, fatiguing
-    "harsh_low": "harshness",     # Too dull/dark — no presence, lifeless top
-    "space_wet": "space",         # Too much reverb — washed-out, distant
-    "space_dry": "space",         # Too dry/dead — no air, no room
-    "masking_high": "masking",    # Stem obscured by another — can't cut through
-    "masking_low": "masking",     # Overly separated — doesn't blend/glue
-    "stereo_wide": "stereo",      # Too wide — unfocused, hollow center
-    "stereo_narrow": "stereo",    # Too narrow/mono — no width, crowded center
-    "dynamics_over": "dynamics",  # Over-processed — squashed, flat, no punch
-    "dynamics_under": "dynamics", # Under-controlled — inconsistent, lurching
-    "phase": "phase",             # Phase problem — comb filtering, cancellation
+    # level — figure (vocal) or any stem volume
+    "too_quiet": "level",
+    "too_loud": "level",
+    # body — muddy=bed only; thin=figure only
+    "muddy": "body",
+    "thin": "body",
+    # brightness — figure only
+    "harsh": "brightness",
+    "dull": "brightness",
+    # space
+    "too_wet": "space",
+    "too_dry": "space",  # deprecated in recipes, still valid for dialogue
+    # dynamic — figure only
+    "over_compressed": "dynamic",
+    "under_compressed": "dynamic",
+    # masking — swamping=bed aggressor; invading=figure aggressor
+    "swamping": "masking",
+    "invading": "masking",
+    # stereo
+    "too_wide": "stereo",
+    "too_narrow": "stereo",
+    # phase — no direction
+    "phase": "phase",
 }
 VALID_DIMENSIONS = set(DIMENSION_TO_AXIS) | {"none"}
-
-# 舊 9-key 名稱的相容對應 (mud / harshness / masking 未分方向的舊標)
-DIMENSION_ALIASES = {
-    "mud": "mud_high",
-    "harshness": "harsh_high",
-    "masking": "masking_high",
-}
 VALID_CONFIDENCE = {"low", "mid", "high"}
 
 # problem_stem / fix_stem 只允許固定值 (樂器 + mix),其他一律 normalize 成 other
 VALID_STEMS = {
     "vocal", "guitar", "bass", "drums", "kick", "snare", "hats", "toms",
     "overheads", "cymbals", "percussion", "keys", "piano", "synth",
-    "strings", "horns", "mix", "",
+    "strings", "horns", "ambience", "mix", "",
 }
 STEM_ALIASES = {
     "vocals": "vocal", "vox": "vocal", "lead vocal": "vocal",
+    "lead vocals": "vocal", "main vocal": "vocal",
+    "backing vocal": "vocal", "backing vocals": "vocal",
+    "bgv": "vocal", "bgvs": "vocal", "harmony": "vocal",
+    "harmonies": "vocal", "doubles": "vocal", "double": "vocal",
     "guitars": "guitar", "electric guitar": "guitar", "acoustic guitar": "guitar",
     "drum": "drums", "tom": "toms", "hat": "hats", "hi-hat": "hats",
     "hihat": "hats", "hi-hats": "hats", "overhead": "overheads",
@@ -122,9 +127,9 @@ STEM_ALIASES = {
 #       "has_problem": true/false,
 #       "problem_text": "原文句子,沒有則空字串",
 #       "problem_stem": "問題的 stem (固定清單,見 VALID_STEMS),沒有則空字串",
-#       "problem_dimension": "15 dimensions 之一或 none (axis 由 code 反查)",
+#       "problem_dimension": "15 signed dimensions 之一或 none (axis 由 code 反查)",
 #       "problem_speaker": "amateur / expert / 空字串",
-#       "vocal_lead": true/false (有討論到 vocal 就 true),
+#       "vocal_lead": true/false (僅 lead vocal 為 true; backing vocals 為 false),
 #       "has_fix": true/false,
 #       "fix_text": "原文句子,沒有則空字串",
 #       "fix_stem": "fix 針對的 stem,沒有則空字串",
@@ -137,10 +142,15 @@ STEM_ALIASES = {
 #   ]
 # }
 #
-# dimension 允許值 (8 axes x 2 方向,phase 只有一個):
-#   level_low, level_high, mud_high, mud_low, harsh_high, harsh_low,
-#   space_wet, space_dry, masking_high, masking_low, stereo_wide,
-#   stereo_narrow, dynamics_over, dynamics_under, phase, none
+# 8 axes (problem_axis 由 code 反查, LLM 只填 problem_dimension):
+#   level, body, brightness, space, dynamic, masking, stereo, phase
+#
+# problem_dimension 允許值 (14 signed + phase + none):
+#   too_quiet, too_loud, muddy, thin, harsh, dull, too_wet, too_dry,
+#   over_compressed, under_compressed, swamping, invading,
+#   too_wide, too_narrow, phase, none
+#
+# 禁止把 dimension 名稱當 axis (例如 harsh/muddy 是 dimension, 不是 axis)。
 #
 # 建議 prompt 要涵蓋的規則 (對應 user message 的組成,見 build_user_message):
 #   - problem 和 fix 必須來自同一個 turn
@@ -194,53 +204,93 @@ AFFECTED STEM vs ACTION TARGET (critical)
 - problem_stem = the instrument that is suffering / the perceptual problem
   is about (what you cannot hear, what sounds wrong).
 - fix_stem = the instrument you operate on (fader, EQ, mute, etc.).
-- These often DIFFER. Example: HISTORY says snare is lost; CURRENT says
+- They can differ. Example: HISTORY says snare is lost; CURRENT says
   the cymbal is filling highs and "pull that back" → problem_stem=snare,
-  problem_dimension=masking_high, fix_stem=cymbals, fix_action=lower_level
+  problem_dimension=swamping, fix_stem=cymbals, fix_action=lower_level
   or eq_cut. Do NOT set problem_stem=cymbals just because that is what
   you turn down — the cymbal is the cause/masker, not the problem stem.
-- For masking_high: problem_stem is always the obscured source. Name the
-  competing source in label_reasoning (and usually as fix_stem if that is
-  what gets adjusted).
+- For swamping: problem_stem is the victim (the source being covered up).
+  Name the aggressor/masker in label_reasoning (and usually as fix_stem if
+  that is what gets adjusted).
+- For invading: problem_stem is the source being intruded on / stepped on;
+  the aggressor is the source that feels too forward in the same space.
 - If CURRENT only names the cause ("that cymbal") but HISTORY already
   established the affected source (snare lost), keep problem_stem as the
   affected source from HISTORY.
-DIMENSIONS (8 axes x 2 directions; phase has 1)
-- level_low: too quiet, buried, weak. | level_high: too loud, overpowering.
-- mud_high: too much low/low-mid; boomy, thick, muddy. | mud_low: thin,
-  hollow, no body, lacks low end.
-- harsh_high: too much upper-mid/high; harsh, piercing, gritty. |
-  harsh_low: dull, dark, muffled, no presence.
-- space_wet: too much reverb/ambience/room; washed out, distant. |
-  space_dry: too dry, dead, no air (includes too-quiet drum room/amb).
-- masking_high: obscured by a competing source, can't cut through. |
-  masking_low: overly separated, doesn't blend or glue.
-- stereo_wide: too wide, hollow center. | stereo_narrow: too narrow/mono,
-  crowded center.
-- dynamics_over: squashed, flat, no punch from over-processing. |
-  dynamics_under: uncontrolled, uneven, lurching.
+FIGURE vs BAND (vocal_lead)
+- MixAssist often talks about a foreground source (often lead vocal) versus
+  the backing bed / band, but this is a heuristic, not a hard schema rule.
+- vocal_lead: true ONLY if THIS label involves the LEAD / main vocal
+  (problem or fix about the lead vocal's level, tone, space, etc.).
+- vocal_lead: false for backing vocals, doubles, harmonies, ad-libs, and
+  any non-lead vocal layer — even if problem_stem is still "vocal".
+- Use HISTORY to tell lead vs backing when CURRENT is vague ("it", "that",
+  "wanted it more in the background"). If HISTORY established backing
+  vocals and CURRENT continues that thread, keep vocal_lead=false.
+- vocal_lead is a separate boolean only. Do NOT use it to override the
+  chosen axis or problem_dimension.
+- Do not hard-code dimensions to vocal-only or band-only. A dimension
+  should be chosen from the wording of the complaint, not from whether
+  the source is vocal or accompaniment.
+AXES AND DIMENSIONS (CRITICAL — use EXACT strings)
+There are exactly 8 axes. You output problem_dimension ONLY; code maps to
+problem_axis. NEVER output an axis name as problem_dimension.
+| AXIS        | problem_dimension (pick ONE)              |
+| level       | too_quiet | too_loud                        |
+| body        | muddy     | thin                            |
+| brightness  | harsh     | dull                            |
+| space       | too_wet   | too_dry                         |
+| dynamic     | over_compressed | under_compressed          |
+| masking     | swamping  | invading                        |
+| stereo      | too_wide  | too_narrow                      |
+| phase       | phase (only one; no opposite)           |
+| (none)      | none                                      |
+Meanings:
+- too_quiet: buried, weak, can't hear. | too_loud: dominant, overpowering.
+- muddy: too much low/low-mid — boomy, thick, cloudy.
+  | thin: lacks body/warmth, too lean.
+- harsh: piercing, gritty, fatiguing highs. | dull: dark, muffled, no air.
+- too_wet: too much reverb/room/ambience; washed out, interrupts phrases.
+  | too_dry: too little reverb/room/ambience — dry, no air, reverb tail too
+  quiet to hear (includes drum room too quiet; backing-vocal reverb that
+  needs to be audible / more "in the background" via wetness).
+- over_compressed: squashed, flat, no punch. | under_compressed: uneven,
+  lurching, inconsistent dynamics.
+- swamping: a competing source masks the victim; the victim can't cut through.
+  | invading: a source is too forward and intrudes on another source's space.
+- too_wide: unfocused, hollow center. | too_narrow: mono-ish, no width.
 - phase: cancellation, comb filtering, polarity issues.
 - none: no supported problem.
 DECISION RULES
-- POLARITY CHECK (mandatory): the dimension direction must match the
-  complaint. "too dry / needs ambience" = space_dry, NEVER space_wet;
-  "too wet / washed out" = space_wet; "too quiet" = level_low; "too loud"
-  = level_high. Verify problem_text and dimension point the same way.
-- masking_high over level_low only when another source explicitly causes
-  the inaudibility (or HISTORY already established that causal link).
-  Simple volume complaints with no competing source are level_low/level_high.
+- POLARITY CHECK (mandatory): dimension direction must match the complaint.
+  "needs more ambience / too dry" = too_dry, NEVER too_wet; "too wet /
+  washed out" = too_wet; "too quiet" = too_quiet; "too loud" = too_loud.
+  Verify problem_text and dimension point the same way.
+- REVERB vs LEVEL (mandatory): if the talk is about reverb / send / room /
+  delay / reverb-tail amount or audibility, use SPACE — not LEVEL on the
+  dry stem. Examples:
+  * reverb too quiet / can't hear the tail / need more air / want it more
+    "in the background" via reverb → too_dry (raise reverb / send / tail).
+  * reverb too loud / washes out / interrupts → too_wet (lower reverb /
+    send / tail).
+  Do NOT label these as too_loud / too_quiet on vocal just because a
+  fader or "volume" word appears on the reverb return.
+- swamping over too_quiet only when another source explicitly causes the
+  inaudibility (or HISTORY established that link). Simple volume with no
+  competing source → too_quiet / too_loud.
 - DRUM ROOM vs OVERHEADS (mandatory):
   - Drum room / room mic / ambience / amb tracks: level or send amount of
-    the room is SPACE (space_wet if too much room, space_dry if too little).
-    Prefer stem "ambience" (or "other" only if clearly not ambience).
-  - Overheads: treat as a drum instrument (like snare, hats, toms). Volume
-    of overheads is LEVEL (level_high / level_low), NOT space. Stem
-    "overheads".
-- "flat"/"no punch" is dynamics_over only when compression/limiting is
+    the room is SPACE (too_wet if too much room, too_dry if too little).
+    Stem "ambience".
+  - Overheads: drum instrument (like snare, hats). Volume of overheads is
+    LEVEL (too_loud / too_quiet), NOT space. Stem "overheads".
+- "flat"/"no punch" is over_compressed only when compression/limiting is
   implied; otherwise none.
-- Arrangement/composition comments (how many parts play, what would be a
-  cool effect) and pure preferences are none, unless presented as something
-  to change.
+- Enhancement suggestions without a stated defect ("add saturation for
+  warmth", "try distortion") are NOT problems — has_problem=false unless
+  the speaker clearly says something sounds wrong.
+- Arrangement/composition comments and pure stylistic preferences are none,
+  unless presented as something to change in this mix.
 FIELD RULES
 - problem_stem / fix_stem MUST be one of: vocal, guitar, bass, drums, kick,
   snare, hats, toms, overheads, cymbals, percussion, keys, piano, synth,
@@ -250,7 +300,8 @@ FIELD RULES
   "low end". Resolve pronouns / "that" from HISTORY. Remember:
   problem_stem = affected; fix_stem = action target (may differ).
 - problem_speaker / fix_speaker: "amateur", "expert", or "".
-- vocal_lead: true if the label's problem or fix involves the vocal at all.
+- vocal_lead: true ONLY for lead/main vocal; false for backing vocals /
+  doubles / harmonies (see FIGURE vs BAND).
 - has_speaker: true only if the problem or fix is attributable to a speaker.
 - fix_action: concise normalized action when explicit (lower_level,
   raise_level, eq_cut, eq_boost, add_reverb, reduce_reverb, add_compression,
@@ -378,7 +429,7 @@ def format_history_readable(history: list[dict]) -> str:
         "INPUT HISTORY (earlier turns — auxiliary for stem / axis / dimension;",
         "and for problem_text ONLY if CURRENT TURN has no usable problem statement.",
         "If CURRENT only says 'adjust/pull that', recover the continued defect from HISTORY;",
-        "problem_stem = affected instrument; fix_stem = what you operate on — often different):",
+        "problem_stem = affected instrument; fix_stem = what you operate on — may differ):",
     ]
     for t, block in enumerate(blocks, 1):
         lines.append(f"--- earlier turn {t} ---")
@@ -425,18 +476,36 @@ def build_user_message(row: dict) -> str:
 
 # ====================== LLM 呼叫與解析 ======================
 def extract_json(text: str) -> dict:
-    """從模型回覆中抽出 JSON (容錯: code fence 或多餘文字)。"""
-    text = text.strip()
+    """從模型回覆中抽出 JSON (容錯: code fence、多餘文字、常見語法瑕疵)。"""
+    text = (text or "").strip()
     fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if fence:
-        text = fence.group(1)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        brace = re.search(r"\{.*\}", text, re.DOTALL)
-        if brace:
-            return json.loads(brace.group(0))
-        raise
+        text = fence.group(1).strip()
+
+    candidates = [text]
+    brace = re.search(r"\{.*\}", text, re.DOTALL)
+    if brace:
+        candidates.append(brace.group(0))
+
+    last_err: Exception | None = None
+    for cand in candidates:
+        for variant in (cand, _repair_json_text(cand)):
+            try:
+                return json.loads(variant)
+            except json.JSONDecodeError as e:
+                last_err = e
+    if last_err is not None:
+        raise last_err
+    raise json.JSONDecodeError("Expecting value", text, 0)
+
+
+def _repair_json_text(text: str) -> str:
+    """修常見 LLM JSON 瑕疵: 尾逗號、單引號 key/字串。"""
+    # trailing commas before } or ]
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    # 'key': → "key":  (粗修,只處理簡單情況)
+    text = re.sub(r"'([^'\\]*)'\s*:", r'"\1":', text)
+    return text
 
 
 def pick_precision(requested: str) -> str:
@@ -520,7 +589,6 @@ def call_llm(processor, model, system_prompt: str, user_message: str) -> str:
 
 def normalize_dimension(value) -> str:
     v = str(value or "none").strip().lower()
-    v = DIMENSION_ALIASES.get(v, v)
     return v if v in VALID_DIMENSIONS else "none"
 
 
@@ -709,6 +777,7 @@ def main() -> None:
                 continue
 
             user_message = build_user_message(row)
+            raw_reply = ""
             try:
                 raw_reply = call_llm(processor, model, system_prompt, user_message)
                 parsed = extract_json(raw_reply)
@@ -721,13 +790,21 @@ def main() -> None:
                     raw_jsonl,
                     {"key": list(key), "user_message": user_message, "raw_reply": raw_reply},
                 )
-                dims = [r["problem_dimension"] for r in out_rows]
+                dims = [f"{r['problem_axis']}/{r['problem_dimension']}" for r in out_rows]
                 print(f"{tag} -> {len(out_rows)} label(s): {dims}")
             except Exception as e:
                 print(f"{tag} -> 錯誤: {e}")
                 failures.append((key, str(e)))
                 append_rows(output_csv, [error_row(row, str(e))])
-                append_raw(raw_jsonl, {"key": list(key), "error": str(e)})
+                append_raw(
+                    raw_jsonl,
+                    {
+                        "key": list(key),
+                        "error": str(e),
+                        "user_message": user_message,
+                        "raw_reply": raw_reply,
+                    },
+                )
 
     print(f"\n完成。輸出: {output_csv}")
     print(f"原始回覆: {raw_jsonl}")

@@ -194,6 +194,11 @@ def main() -> None:
         help="丟到 GPU 的層數 (-1 = 全部)",
     )
     parser.add_argument("--verbose", action="store_true", help="顯示 llama.cpp 載入細節")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="刪除既有輸出後重跑 (換 schema/prompt 後重新標註用)",
+    )
     args = parser.parse_args()
 
     system_prompt = SYSTEM_PROMPT.strip()
@@ -215,6 +220,12 @@ def main() -> None:
         raw_jsonl = output_csv.with_name(output_csv.stem + "_raw.jsonl")
         written.append(output_csv)
 
+        if args.overwrite:
+            for p in (output_csv, raw_jsonl):
+                if p.exists():
+                    p.unlink()
+                    print(f"[{split}] --overwrite: 已刪除 {p.name}")
+
         done = load_done_keys(output_csv)
         if done:
             print(f"[{split}] 偵測到既有輸出 {output_csv.name},已完成 {len(done)} 個 turn,將跳過。")
@@ -230,6 +241,7 @@ def main() -> None:
                 continue
 
             user_message = build_user_message(row)
+            raw_reply = ""
             try:
                 t0 = time.perf_counter()
                 raw_reply = call_llm(llm, system_prompt, user_message)
@@ -249,13 +261,21 @@ def main() -> None:
                         "raw_reply": raw_reply,
                     },
                 )
-                dims = [r["problem_dimension"] for r in out_rows]
+                dims = [f"{r['problem_axis']}/{r['problem_dimension']}" for r in out_rows]
                 print(f"{tag} -> {len(out_rows)} label(s): {dims} ({elapsed:.1f}s)")
             except Exception as e:
                 print(f"{tag} -> 錯誤: {e}")
                 failures.append((key, str(e)))
                 append_rows(output_csv, [error_row(row, str(e))])
-                append_raw(raw_jsonl, {"key": list(key), "error": str(e)})
+                append_raw(
+                    raw_jsonl,
+                    {
+                        "key": list(key),
+                        "error": str(e),
+                        "user_message": user_message,
+                        "raw_reply": raw_reply,
+                    },
+                )
 
     print("\n完成。輸出:")
     for p in written:

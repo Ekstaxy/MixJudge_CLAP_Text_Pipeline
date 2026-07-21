@@ -201,6 +201,7 @@ def main() -> None:
                 continue
 
             user_message = build_user_message(row)
+            raw_reply = ""
             try:
                 raw_reply = call_llm(client, args.model, system_prompt, user_message)
                 parsed = extract_json(raw_reply)
@@ -218,13 +219,21 @@ def main() -> None:
                         "raw_reply": raw_reply,
                     },
                 )
-                dims = [r["problem_dimension"] for r in out_rows]
+                dims = [f"{r['problem_axis']}/{r['problem_dimension']}" for r in out_rows]
                 print(f"{tag} -> {len(out_rows)} label(s): {dims}")
             except Exception as e:
                 print(f"{tag} -> 錯誤: {e}")
                 failures.append((key, str(e)))
                 append_rows(output_csv, [error_row(row, str(e))])
-                append_raw(raw_jsonl, {"key": list(key), "error": str(e)})
+                append_raw(
+                    raw_jsonl,
+                    {
+                        "key": list(key),
+                        "error": str(e),
+                        "user_message": user_message,
+                        "raw_reply": raw_reply,
+                    },
+                )
 
             if args.sleep > 0:
                 time.sleep(args.sleep)

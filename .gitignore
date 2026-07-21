@@ -2,7 +2,6 @@ audio/*
 Full_Group_Convos/
 *.parquet
 *.csv
-Notes.txt
 outputs/*
 models/*.gguf
 models/.cache/
