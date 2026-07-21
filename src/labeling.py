@@ -9,19 +9,20 @@ MixAssist 標記 pipeline (Phase 2a)。
   outputs/labeled_turns.csv         標註結果 (一個 problem 一列,一 turn 可多列)
   outputs/labeled_turns_raw.jsonl   每個 turn 的原始 LLM 回覆 (debug 用)
 
-本地 GPU 推論版 (V100 32GB+):
+本地 GPU 推論版 (V100 32GB):
   - V100 不支援 bfloat16,一律用 float16 計算。
-  - 31B 模型 fp16 約需 62GB VRAM,放不進 36GB,因此預設 4-bit NF4 量化 (~18GB)。
-  - 可用 --precision 強制指定: 4bit / 8bit / fp16 / auto (預設 auto,依 VRAM 自動選)。
+  - 31B fp16 ~62GB,放不進 32GB,預設 4-bit NF4 (~18GB)。
+  - --precision: 4bit / 8bit / fp16 / auto (預設 auto)。
+  - torch 請用 cu126 (cu130 不支援 V100 CC 7.0)。
 
 用法:
-  python src/labeling.py --splits train --limit 5       # 測試: 只標 train 前 5 個 turn
-  python src/labeling.py                                # 全量: train + validation + test
-  python src/labeling.py --splits validation test       # 指定 split
-  python src/labeling.py --precision 4bit               # 強制 4-bit 量化
+  python src/labeling.py --splits train --limit 5
+  python src/labeling.py
+  python src/labeling.py --precision 4bit
 
 需要套件:
-  pip install -U transformers torch accelerate bitsandbytes
+  pip install -U 'torch==2.13.0' torchvision --index-url https://download.pytorch.org/whl/cu126
+  pip install -U transformers accelerate bitsandbytes
 
 中斷後重跑會自動跳過已標過的 turn (增量寫入)。
 """
@@ -30,16 +31,20 @@ import argparse
 import ast
 import csv
 import json
+import os
 import random
 import re
 import sys
 from pathlib import Path
 
+# V100: CUDA 13 ptxas 不支援 sm_70,關掉 torch native Triton JIT
+os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
+
 # torch / transformers 延遲載入 (在 pick_precision / load_model 內 import),
 # 讓 labeling_groq.py 等 API 版可以 import 本檔的共用函式而不需要 GPU 套件。
 
 # ====================== 設定 ======================
-HF_TOKEN = ""  # <-- Hugging Face token (模型下載用,已下載過可留空)
+HF_TOKEN = ""  # <-- Hugging Face token (已下載過可留空)
 MODEL_ID = "google/gemma-4-31B-it"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -435,15 +440,15 @@ def extract_json(text: str) -> dict:
 
 
 def pick_precision(requested: str) -> str:
-    """依 VRAM 決定精度。V100 36GB: 31B fp16 放不下,預設 4bit。"""
+    """依 VRAM 決定精度。V100 32GB: 31B fp16 放不下,預設 4bit。"""
     import torch
 
     if requested != "auto":
         return requested
     if not torch.cuda.is_available():
-        sys.exit("找不到 CUDA GPU。請確認 torch 有裝 CUDA 版且 GPU 可用。")
+        sys.exit("找不到 CUDA GPU。請確認 torch 有裝 CUDA 版 (cu126) 且 GPU 可用。")
     total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    # 31B 參數: fp16 ~62GB, 8bit ~31GB, 4bit ~18GB (皆不含 KV cache)
+    # 31B: fp16 ~62GB, 8bit ~31GB, 4bit ~18GB (不含 KV cache)
     if total_gb >= 70:
         return "fp16"
     if total_gb >= 40:
@@ -472,7 +477,7 @@ def load_model(precision: str):
     else:  # fp16
         kwargs["dtype"] = torch.float16
 
-    print(f"載入模型 {MODEL_ID} (precision={precision}),第一次會下載權重,請稍候...")
+    print(f"載入模型 {MODEL_ID} (precision={precision}) 到 GPU,請稍候...")
     processor = AutoProcessor.from_pretrained(MODEL_ID, token=HF_TOKEN or None)
     model = AutoModelForMultimodalLM.from_pretrained(MODEL_ID, **kwargs)
     model.eval()
@@ -483,6 +488,7 @@ def load_model(precision: str):
 def call_llm(processor, model, system_prompt: str, user_message: str) -> str:
     import torch
 
+    device = next(model.parameters()).device
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
@@ -494,7 +500,7 @@ def call_llm(processor, model, system_prompt: str, user_message: str) -> str:
         return_tensors="pt",
         add_generation_prompt=True,
         enable_thinking=False,
-    ).to(model.device)
+    ).to(device)
     input_len = inputs["input_ids"].shape[-1]
 
     with torch.inference_mode():
@@ -668,7 +674,7 @@ def main() -> None:
         "--precision",
         choices=["auto", "4bit", "8bit", "fp16"],
         default="auto",
-        help="模型精度 (預設 auto: 依 VRAM 自動選,36GB V100 會選 4bit)",
+        help="模型精度 (預設 auto: 依 VRAM 自動選,32GB V100 會選 4bit)",
     )
     args = parser.parse_args()
 
