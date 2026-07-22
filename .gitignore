@@ -5,3 +5,4 @@ Full_Group_Convos/
 outputs/*
 models/*.gguf
 models/.cache/
+Notes.txt
