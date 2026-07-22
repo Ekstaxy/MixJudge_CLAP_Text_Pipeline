@@ -49,6 +49,7 @@ from labeling import (
     error_row,
     load_split,
     load_done_keys,
+    purge_error_rows,
     append_rows,
     append_raw,
 )
@@ -177,6 +178,10 @@ def main() -> None:
     output_csv: Path = args.output or default_output(args.model)
     raw_jsonl = output_csv.with_name(output_csv.stem + "_raw.jsonl")
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    removed = purge_error_rows(output_csv)
+    if removed:
+        print(f"已清除 {removed} 筆舊 error 列,將重試。")
 
     done = load_done_keys(output_csv)
     if done:

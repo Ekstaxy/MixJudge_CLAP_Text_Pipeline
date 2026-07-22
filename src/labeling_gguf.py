@@ -87,6 +87,7 @@ from labeling import (  # noqa: E402
     error_row,
     load_split,
     load_done_keys,
+    purge_error_rows,
     append_rows,
     append_raw,
 )
@@ -109,7 +110,7 @@ def split_output(output_dir: Path, split: str) -> Path:
 TEMPERATURE = 0.1
 N_CTX = 6144
 N_BATCH = 512
-MAX_TOKENS = 768
+MAX_TOKENS = 1536
 N_GPU_LAYERS = -1
 TOP_P = 0.95
 TOP_K = 64
@@ -225,6 +226,10 @@ def main() -> None:
                 if p.exists():
                     p.unlink()
                     print(f"[{split}] --overwrite: 已刪除 {p.name}")
+
+        removed = purge_error_rows(output_csv)
+        if removed:
+            print(f"[{split}] 已清除 {removed} 筆舊 error 列,將重試。")
 
         done = load_done_keys(output_csv)
         if done:

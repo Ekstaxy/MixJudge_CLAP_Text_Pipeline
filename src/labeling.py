@@ -254,8 +254,12 @@ Meanings:
   | too_dry: too little reverb/room/ambience — dry, no air, reverb tail too
   quiet to hear (includes drum room too quiet; backing-vocal reverb that
   needs to be audible / more "in the background" via wetness).
-- over_compressed: squashed, flat, no punch. | under_compressed: uneven,
-  lurching, inconsistent dynamics.
+- over_compressed: too much compression/limiting — squashed, flat, lifeless,
+  pumping, energy lost BECAUSE of compression (fix often reduce_compression
+  / slower attack / less ratio).
+  | under_compressed: uncontrolled / uneven dynamics OR lacks punch, snap,
+  transient impact (needs compression or transient shaping; "could use more
+  punch", "snappier", peaking/clicky inconsistent levels).
 - swamping: a competing source masks the victim; the victim can't cut through.
   | invading: a source is too forward and intrudes on another source's space.
 - too_wide: unfocused, hollow center. | too_narrow: mono-ish, no width.
@@ -266,6 +270,15 @@ DECISION RULES
   "needs more ambience / too dry" = too_dry, NEVER too_wet; "too wet /
   washed out" = too_wet; "too quiet" = too_quiet; "too loud" = too_loud.
   Verify problem_text and dimension point the same way.
+- PUNCH / COMPRESSION (mandatory — easy to reverse):
+  * "needs more punch / snappier / could use punch / add transient shaping
+    to get hit back" → under_compressed (lack of punch). NEVER over_compressed.
+  * "too punchy" (peaks/transients too aggressive, uncontrolled hit) →
+    under_compressed (needs compression / dynamic control). NOT too_loud
+    and NOT over_compressed — even if someone lowers a fader as a workaround.
+  * "squashed / flat from compression / losing energy because compressor
+    attack/release/ratio is too aggressive" → over_compressed.
+    over_compressed means TOO LITTLE punch left after over-processing.
 - REVERB vs LEVEL (mandatory): if the talk is about reverb / send / room /
   delay / reverb-tail amount or audibility, use SPACE — not LEVEL on the
   dry stem. Examples:
@@ -284,8 +297,6 @@ DECISION RULES
     Stem "ambience".
   - Overheads: drum instrument (like snare, hats). Volume of overheads is
     LEVEL (too_loud / too_quiet), NOT space. Stem "overheads".
-- "flat"/"no punch" is over_compressed only when compression/limiting is
-  implied; otherwise none.
 - Enhancement suggestions without a stated defect ("add saturation for
   warmth", "try distortion") are NOT problems — has_problem=false unless
   the speaker clearly says something sounds wrong.
@@ -476,7 +487,7 @@ def build_user_message(row: dict) -> str:
 
 # ====================== LLM 呼叫與解析 ======================
 def extract_json(text: str) -> dict:
-    """從模型回覆中抽出 JSON (容錯: code fence、多餘文字、常見語法瑕疵)。"""
+    """從模型回覆中抽出 JSON (容錯: code fence、多餘文字、常見語法瑕疵、截斷)。"""
     text = (text or "").strip()
     fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if fence:
@@ -494,6 +505,12 @@ def extract_json(text: str) -> dict:
                 return json.loads(variant)
             except json.JSONDecodeError as e:
                 last_err = e
+
+    # Truncated multi-label JSON: keep complete label objects.
+    salvaged = _salvage_labels(text)
+    if salvaged:
+        return {"labels": salvaged}
+
     if last_err is not None:
         raise last_err
     raise json.JSONDecodeError("Expecting value", text, 0)
@@ -506,6 +523,21 @@ def _repair_json_text(text: str) -> str:
     # 'key': → "key":  (粗修,只處理簡單情況)
     text = re.sub(r"'([^'\\]*)'\s*:", r'"\1":', text)
     return text
+
+
+def _salvage_labels(text: str) -> list[dict]:
+    """從截斷的 labels JSON 中救回已完整的 label 物件。"""
+    out: list[dict] = []
+    for m in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            obj = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and (
+            "problem_dimension" in obj or "has_problem" in obj or "has_fix" in obj
+        ):
+            out.append(obj)
+    return out
 
 
 def pick_precision(requested: str) -> str:
@@ -671,6 +703,27 @@ def error_row(row: dict, error: str) -> dict:
 
 
 # ====================== 增量寫入 ======================
+def purge_error_rows(output_csv: Path) -> int:
+    """刪除 CSV 裡帶 error 的列,讓失敗 turn 可干净重試且不留下 stale error。
+
+    Returns:
+        刪除的列數。
+    """
+    if not output_csv.exists():
+        return 0
+    with open(output_csv, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    keep = [r for r in rows if not str(r.get("error") or "").strip()]
+    removed = len(rows) - len(keep)
+    if removed == 0:
+        return 0
+    with open(output_csv, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS)
+        writer.writeheader()
+        writer.writerows(keep)
+    return removed
+
+
 def load_done_keys(output_csv: Path) -> set[tuple]:
     """讀取已輸出的 (split, conversation_id, turn_id),供中斷重跑時跳過。"""
     if not output_csv.exists():
@@ -753,6 +806,10 @@ def main() -> None:
     output_csv: Path = args.output
     raw_jsonl = output_csv.with_name(output_csv.stem + "_raw.jsonl")
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    removed = purge_error_rows(output_csv)
+    if removed:
+        print(f"已清除 {removed} 筆舊 error 列,將重試。")
 
     done = load_done_keys(output_csv)
     if done:
