@@ -6,3 +6,4 @@ outputs/*
 models/*.gguf
 models/.cache/
 Notes.txt
+advice.md
