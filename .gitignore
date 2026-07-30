@@ -8,3 +8,26 @@ models/.cache/
 Notes.txt
 advice.md
 mix_judge_claude_note.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+# 虛擬環境 / 工具快取
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+# IDE（看你要不要共用設定）
+.idea/
+.vscode/
+# 執行產物（若還沒被 outputs/* 蓋到）
+*.log
