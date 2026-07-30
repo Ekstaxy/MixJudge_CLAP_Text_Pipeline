@@ -2,16 +2,20 @@
 """
 MixAssist 標記 pipeline (Phase 2a) — 本地 GGUF / llama.cpp 版。
 
-功能與 src/labeling.py 相同 (同一套 prompt / schema / 輸出格式),
+功能與 labeling_hf.py 相同 (同一套 prompt / schema / 輸出格式),
+共用邏輯在 labeling_common.py；prompt 在 prompts/labeling_prompt.py。
 改用 llama-cpp-python 載入 Q4_K_M GGUF,在 V100 上把全部層丟 GPU。
 
 預設模型檔:
   models/google_gemma-4-31B-it-Q4_K_M.gguf
 
-用法:
-  python src/labeling_gguf.py --splits train --limit 5
-  python src/labeling_gguf.py
-  python src/labeling_gguf.py --model-path models/xxx.gguf
+用法 (在專案根目錄):
+  python src/labeling/labeling_gguf.py --splits train --limit 5
+  python src/labeling/labeling_gguf.py
+  python src/labeling/labeling_gguf.py --model-path models/xxx.gguf
+
+或:
+  cd src && python -m labeling.labeling_gguf
 
 輸出 (每個 split 各一檔):
   outputs/labeled_turns_gguf_train.csv
@@ -32,6 +36,11 @@ import random
 import sys
 import time
 from pathlib import Path
+
+# Bootstrap src/ onto path when run as a file (python src/labeling/labeling_gguf.py)
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 
 def _prepare_cuda_libs() -> None:
@@ -78,21 +87,21 @@ _prepare_cuda_libs()
 
 from llama_cpp import Llama  # noqa: E402
 
-from labeling import (  # noqa: E402
-    SYSTEM_PROMPT,
+from labeling.labeling_common import (  # noqa: E402
+    PROJECT_ROOT,
     SPLIT_FILES,
+    SYSTEM_PROMPT,
+    append_raw,
+    append_rows,
     build_user_message,
+    error_row,
     extract_json,
     labels_to_rows,
-    error_row,
-    load_split,
     load_done_keys,
+    load_split,
     purge_error_rows,
-    append_rows,
-    append_raw,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GGUF = PROJECT_ROOT / "models" / "google_gemma-4-31B-it-Q4_K_M.gguf"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 
@@ -204,7 +213,7 @@ def main() -> None:
 
     system_prompt = SYSTEM_PROMPT.strip()
     if not system_prompt:
-        sys.exit("SYSTEM_PROMPT 為空,請在 src/labeling.py 填入 prompt。")
+        sys.exit("SYSTEM_PROMPT 為空,請在 src/prompts/labeling_prompt.py 填入 prompt。")
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)

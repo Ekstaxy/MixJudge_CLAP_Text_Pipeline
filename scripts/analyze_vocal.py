@@ -6,8 +6,8 @@ Vocal-related distribution analysis on labeling CSV outputs.
   outputs/labeled_turns_gguf_{train,validation,test}.csv
 
 也可指定單一檔:
-  python src/analyze_vocal.py --csv outputs/labeled_turns_gguf_all_problems.csv
-  python src/analyze_vocal.py --csv outputs/labeled_turns_groq_llama-3.3-70b-versatile.csv
+  python scripts/analyze_vocal.py --csv outputs/labeled_turns_gguf_all_problems.csv
+  python scripts/analyze_vocal.py --csv outputs/labeled_turns_groq_llama-3.3-70b-versatile.csv
 
 輸出:
   outputs/vocal_stats.md
@@ -558,8 +558,8 @@ def main() -> None:
     if not all_rows:
         print(
             "No rows loaded. Provide labeled CSVs, e.g.\n"
-            "  python src/analyze_vocal.py\n"
-            "  python src/analyze_vocal.py --csv outputs/labeled_turns_gguf_all_problems.csv"
+            "  python scripts/analyze_vocal.py\n"
+            "  python scripts/analyze_vocal.py --csv outputs/labeled_turns_gguf_all_problems.csv"
         )
         raise SystemExit(1)
 

@@ -11,9 +11,9 @@
   - problem_text 非空
 
 用法:
-  python src/export_problem_pool.py
-  python src/export_problem_pool.py --splits train validation test
-  python src/export_problem_pool.py --min-confidence mid
+  python scripts/export_problem_pool.py
+  python scripts/export_problem_pool.py --splits train validation test
+  python scripts/export_problem_pool.py --min-confidence mid
 """
 
 from __future__ import annotations

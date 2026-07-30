@@ -2,7 +2,7 @@
 """
 MixAssist 標記 pipeline (Phase 2a) — Groq API 版。
 
-功能與 src/labeling.py 相同 (同一套 prompt / schema / 輸出格式),
+功能與 labeling_hf / labeling_gguf 相同 (同一套 prompt / schema / 輸出格式),
 但改用 Groq API 雲端推論,不需要本地 GPU。
 
 可用模型 (--model 切換,兩個都試比較品質):
@@ -15,12 +15,12 @@ MixAssist 標記 pipeline (Phase 2a) — Groq API 版。
   outputs/labeled_turns_groq_llama-3.1-8b-instant.csv
   outputs/labeled_turns_groq_llama-3.1-8b-instant_raw.jsonl
 
-用法:
+用法 (在專案根目錄):
   export GROQ_API_KEY=<your-key>            # 或填在下方 GROQ_API_KEY
-  python src/labeling_groq.py --splits train --limit 5    # 測試: train 前 5 個 turn
-  python src/labeling_groq.py                             # 全量 (70B 模型)
-  python src/labeling_groq.py --model llama-3.1-8b-instant
-  python src/labeling_groq.py --splits validation test
+  python src/labeling/labeling_groq.py --splits train --limit 5
+  python src/labeling/labeling_groq.py
+  python src/labeling/labeling_groq.py --model llama-3.1-8b-instant
+  python src/labeling/labeling_groq.py --splits validation test
 
 需要套件:
   pip install -U groq
@@ -38,20 +38,25 @@ from pathlib import Path
 
 from groq import Groq, RateLimitError, APIError
 
-# 與本地版共用資料處理 / 解析 / 輸出邏輯
-from labeling import (
-    SYSTEM_PROMPT,
-    SPLIT_FILES,
+_SRC_ROOT = Path(__file__).resolve().parent.parent
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+# 與 HF / GGUF 版共用 schema / I/O / parse
+from labeling.labeling_common import (  # noqa: E402
     MAX_NEW_TOKENS,
+    PROJECT_ROOT,
+    SPLIT_FILES,
+    SYSTEM_PROMPT,
+    append_raw,
+    append_rows,
     build_user_message,
+    error_row,
     extract_json,
     labels_to_rows,
-    error_row,
-    load_split,
     load_done_keys,
+    load_split,
     purge_error_rows,
-    append_rows,
-    append_raw,
 )
 
 # ====================== 設定 ======================
@@ -64,8 +69,6 @@ MODELS = [
     "qwen/qwen3.6-27b"
 ]
 DEFAULT_MODEL = MODELS[0]
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 TEMPERATURE = 0.2       # 標註任務要穩定,低溫
 MAX_RETRIES = 5         # rate limit / 暫時性錯誤的重試次數
@@ -83,7 +86,7 @@ def make_client() -> Groq:
     if not api_key:
         sys.exit(
             "找不到 Groq API key。請 export GROQ_API_KEY=<key>,"
-            "或在 src/labeling_groq.py 的 GROQ_API_KEY 填入。"
+            "或在 src/labeling/labeling_groq.py 的 GROQ_API_KEY 填入。"
         )
     return Groq(api_key=api_key)
 
@@ -173,7 +176,7 @@ def main() -> None:
 
     system_prompt = SYSTEM_PROMPT.strip()
     if not system_prompt:
-        sys.exit("SYSTEM_PROMPT 為空,請在 src/labeling.py 填入 prompt。")
+        sys.exit("SYSTEM_PROMPT 為空,請在 src/prompts/labeling_prompt.py 填入 prompt。")
 
     output_csv: Path = args.output or default_output(args.model)
     raw_jsonl = output_csv.with_name(output_csv.stem + "_raw.jsonl")

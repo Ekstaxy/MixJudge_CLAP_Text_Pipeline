@@ -53,20 +53,27 @@ MixAssist CSV (train / validation / test)
 
 ```text
 .
-├── README.md                 # 本說明
+├── README.md
 ├── .gitignore
-├── Labeling_Flow_Chart.png   # 標註管線流程圖
-├── labeling_pipeline.md      # 標註方法說明（論文式）
-├── label_stats.md            # 標註結果統計摘要
-├── generation_note.md        # L2 style transfer 構想筆記
-├── intern_chores.md          # 實習任務與 Phase 規劃
+├── Labeling_Flow_Chart.png
+├── labeling_pipeline.md
+├── label_stats.md
+├── generation_note.md
+├── intern_chores.md
+├── scripts/
+│   ├── export_problem_pool.py
+│   ├── analyze_labels.py
+│   └── analyze_vocal.py
 └── src/
-    ├── labeling.py           # 共用 prompt / 解析 / 寫檔；HF 本地推論
-    ├── labeling_gguf.py      # llama.cpp GGUF（Gemma Q4）全量標註
-    ├── labeling_groq.py      # Groq API 標註（同一 schema）
-    ├── export_problem_pool.py# 匯出 problem-only pool、合併 splits
-    ├── analyze_labels.py     # 標註品質統計與抽查
-    └── generate_l2_style.py  # L2 style transfer 生成
+    ├── labeling/
+    │   ├── labeling_common.py    # schema / I/O / parse / normalize
+    │   ├── labeling_hf.py        # Hugging Face transformers
+    │   ├── labeling_gguf.py      # llama.cpp GGUF
+    │   └── labeling_groq.py      # Groq API
+    ├── prompts/
+    │   ├── labeling_prompt.py
+    │   └── l2_generation_prompt.py
+    └── generate_l2_style.py
 ```
 
 > 大型資料（`*.csv`、`outputs/`、`models/*.gguf`、音訊等）已列在 `.gitignore`，不會出現在 GitHub。本地需自行準備 MixAssist split CSV 與模型權重。
@@ -77,11 +84,13 @@ MixAssist CSV (train / validation / test)
 
 | 檔案 | 角色 |
 |------|------|
-| `src/labeling.py` | 核心：`SYSTEM_PROMPT`、user message 組裝、JSON 解析、`DIMENSION_TO_AXIS`、增量寫入 CSV / JSONL |
-| `src/labeling_gguf.py` | 本地 GGUF 推論；預設每 split 輸出 `outputs/labeled_turns_gguf_{split}.csv` |
-| `src/labeling_groq.py` | 雲端 API 推論，方便快速試 prompt / 比模型 |
-| `src/export_problem_pool.py` | 過濾有效 problem 列，寫出 `*_problems.csv` 與 `*_all_problems.csv` |
-| `src/analyze_labels.py` | 覆蓋率、axis / dimension 分佈、抽樣檢視 |
+| `src/labeling/labeling_common.py` | 共用：`DIMENSION_TO_AXIS`、JSON 解析、增量寫入 CSV / JSONL |
+| `src/prompts/labeling_prompt.py` | `SYSTEM_PROMPT`、user message 組裝 |
+| `src/labeling/labeling_gguf.py` | 本地 GGUF 推論；預設每 split 輸出 `outputs/labeled_turns_gguf_{split}.csv` |
+| `src/labeling/labeling_hf.py` | Hugging Face 本地推論 |
+| `src/labeling/labeling_groq.py` | 雲端 API 推論，方便快速試 prompt / 比模型 |
+| `scripts/export_problem_pool.py` | 過濾有效 problem 列，寫出 `*_problems.csv` 與 `*_all_problems.csv` |
+| `scripts/analyze_labels.py` | 覆蓋率、axis / dimension 分佈、抽樣檢視 |
 | `src/generate_l2_style.py` | 以 problem pool 為 gold + few-shot，生成 Amateur / Expert 對話 |
 
 ---
@@ -107,20 +116,20 @@ MixAssist CSV (train / validation / test)
 
 ```bash
 # 1) 標註（本地 GGUF）
-python src/labeling_gguf.py --splits train --limit 5   # 小量測試
-python src/labeling_gguf.py                            # 全量
+python src/labeling/labeling_gguf.py --splits train --limit 5   # 小量測試
+python src/labeling/labeling_gguf.py                            # 全量
 
 # 2) 匯出 L2 problem pool
-python src/export_problem_pool.py
+python scripts/export_problem_pool.py
 
 # 3) 統計
-python src/analyze_labels.py
+python scripts/analyze_labels.py
 
 # 4) L2 生成（pilot）
 python src/generate_l2_style.py --limit 3
 ```
 
-Groq 版需設定 `GROQ_API_KEY` 後執行 `python src/labeling_groq.py`。
+Groq 版需設定 `GROQ_API_KEY` 後執行 `python src/labeling/labeling_groq.py`。
 
 標註支援中斷續跑（增量寫入）；換 prompt / schema 後可用 `--overwrite` 重標。
 

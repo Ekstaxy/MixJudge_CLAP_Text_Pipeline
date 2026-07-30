@@ -8,9 +8,9 @@
   outputs/labeled_turns_gguf_test.csv
 
 用法:
-  python src/analyze_labels.py
-  python src/analyze_labels.py --splits train validation
-  python src/analyze_labels.py --output-dir outputs --prefix labeled_turns_gguf
+  python scripts/analyze_labels.py
+  python scripts/analyze_labels.py --splits train validation
+  python scripts/analyze_labels.py --output-dir outputs --prefix labeled_turns_gguf
 """
 
 from __future__ import annotations
