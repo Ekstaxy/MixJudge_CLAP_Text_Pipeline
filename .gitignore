@@ -7,3 +7,4 @@ models/*.gguf
 models/.cache/
 Notes.txt
 advice.md
+mix_judge_claude_note.txt
