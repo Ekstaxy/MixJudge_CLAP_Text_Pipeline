@@ -1,19 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-L2 style transfer — structured mix-problem label → Amateur/Expert dialogue.
+L2 style transfer — L1 structured records → Amateur/Expert dialogue (+ problem_state_text).
 
-Uses MixAssist labeled problem rows as:
-  - structured input gold (axis / dim / subject stub)
-  - same-dim few-shot style exemplars (excludes the current turn)
+Pipeline (current):
+  1. Read L1 JSONL (mock or future 学长 export): axis / dimension / subject / source / texts.L1
+  2. Style pool = outputs/labeled_turns_gguf_all_problems.csv (FULL pool; no confidence filter)
+  3. For each L1 row, randomly sample same-dimension MixAssist turns as style exemplars
+     (by problem_dimension only — no vocal preference)
+  4. Generate under two orthogonal axes (fixed low temperature for prompt adherence):
+       mode:             retarget | strict | free   (rewrite policy)
+       exemplar_content: problem_text | raw         (what MixAssist text is fed)
+  5. Model returns JSON: amateur, expert, problem_state_text
 
-Usage:
-  python src/generate_l2_style.py --limit 3
-  python src/generate_l2_style.py
-  python src/generate_l2_style.py --per-dim 5 --seed 42
+Caveats:
+  - Dimension/axis follow MixJudge note + all_problems (14 signed dims). No phase.
+  - Do NOT use labeled_turns_gguf_train.csv as the style pool (includes none/fix noise).
+  - Exemplars often say guitar/drums; prompts must retarget to L1 source/subject.
+  - muddy L1 should be bed-subject (carried-by), not vocal-only anchors.
+  - Temperature is fixed low; looseness comes from --modes, not from temp.
+
+Usage (from repo root):
+  for content in problem_text raw; do
+    python src/generate_l2_style.py --modes retarget strict free \\
+      --exemplar-content "$content" --overwrite
+  done
+  python src/generate_l2_style.py --modes retarget --exemplar-content raw --dry-run --limit 1
 
 Output:
-  outputs/l2_gen_pilot.csv
-  outputs/l2_gen_pilot_raw.jsonl
+  outputs/l2_from_l1_{mode}_{exemplar_content}.csv (+ _raw.jsonl)
+  e.g. l2_from_l1_retarget_raw.csv, l2_from_l1_free_problem_text.csv
 """
 
 from __future__ import annotations
@@ -28,168 +43,249 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-# Reuse GGUF loader / CUDA prep from labeling package
 from labeling.labeling_gguf import (  # noqa: E402
     DEFAULT_GGUF,
     load_llm,
 )
 from prompts.l2_generation_prompt import (  # noqa: E402
-    SYSTEM_PROMPT,
+    VALID_EXEMPLAR_CONTENTS,
+    VALID_MODES,
     build_user_prompt,
-    stem_to_subject,
+    system_prompt_for_mode,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_L1 = PROJECT_ROOT / "data" / "l1_mock_records.jsonl"
 DEFAULT_POOL = PROJECT_ROOT / "outputs" / "labeled_turns_gguf_all_problems.csv"
-DEFAULT_OUTPUT = PROJECT_ROOT / "outputs" / "l2_gen_pilot.csv"
+DEFAULT_OUT_DIR = PROJECT_ROOT / "outputs"
 
-# Generation: more variety than labeling
-TEMPERATURE = 0.7
 TOP_P = 0.95
 TOP_K = 64
 MAX_TOKENS = 768
 N_CTX = 4096
 
+# Single fixed temperature so all modes follow prompt rules (not a third experiment axis).
+FIXED_TEMPERATURE = 0.1
+
 OUTPUT_FIELDS = [
-    "pilot_id",
-    "source_conversation_id",
-    "source_turn_id",
-    "source_split",
+    "l1_segment_id",
+    "l1_text",
     "gold_axis",
     "gold_dim",
-    "gold_stem",
-    "subject",
+    "gold_subject",
+    "source_instrument",
     "severity",
-    "vocal_lead",
-    "source_problem_text",
-    "exemplar_ids",
+    "style_mode",
+    "exemplar_content",
+    "temperature",
+    "style_turn_ids",
+    "style_problem_texts",
+    # MixAssist reference turns (full dialogue; multi-exemplar joined by " ||| ")
+    "style_splits",
+    "style_audio_files",
+    "style_user_raw_contents",
+    "style_assistant_raw_contents",
+    "style_exemplars_json",
     "input_json",
     "amateur_text",
     "expert_text",
     "generated_dialogue",
+    "problem_state_text",
     "error",
 ]
 
+# Separator when packing multiple exemplars into one CSV cell
+EXEMPLAR_SEP = " ||| "
+
+
+def variant_tag(mode: str, exemplar_content: str) -> str:
+    return f"{mode}_{exemplar_content}"
+
+
+def output_csv_path(output_dir: Path, mode: str, exemplar_content: str) -> Path:
+    return output_dir / f"l2_from_l1_{variant_tag(mode, exemplar_content)}.csv"
+
+
+def pack_exemplar_fields(exemplars: list[dict]) -> dict:
+    """Serialize MixAssist style exemplars for CSV + JSON audit."""
+    if not exemplars:
+        return {
+            "style_turn_ids": "",
+            "style_problem_texts": "",
+            "style_splits": "",
+            "style_audio_files": "",
+            "style_user_raw_contents": "",
+            "style_assistant_raw_contents": "",
+            "style_exemplars_json": "[]",
+        }
+    payloads = []
+    for e in exemplars:
+        payloads.append(
+            {
+                "conversation_id": e.get("conversation_id", ""),
+                "turn_id": e.get("turn_id", ""),
+                "split": e.get("split", ""),
+                "audio_file": e.get("audio_file", ""),
+                "problem_stem": e.get("problem_stem", ""),
+                "problem_dimension": e.get("problem_dimension", ""),
+                "problem_text": e.get("problem_text", ""),
+                "user_raw_content": e.get("user_raw_content", ""),
+                "assistant_raw_content": e.get("assistant_raw_content", ""),
+            }
+        )
+    return {
+        "style_turn_ids": ";".join(turn_key(e) for e in exemplars),
+        "style_problem_texts": EXEMPLAR_SEP.join(
+            (e.get("problem_text") or "").strip() for e in exemplars
+        ),
+        "style_splits": EXEMPLAR_SEP.join(
+            str(e.get("split") or "") for e in exemplars
+        ),
+        "style_audio_files": EXEMPLAR_SEP.join(
+            str(e.get("audio_file") or "") for e in exemplars
+        ),
+        "style_user_raw_contents": EXEMPLAR_SEP.join(
+            str(e.get("user_raw_content") or "") for e in exemplars
+        ),
+        "style_assistant_raw_contents": EXEMPLAR_SEP.join(
+            str(e.get("assistant_raw_content") or "") for e in exemplars
+        ),
+        "style_exemplars_json": json.dumps(payloads, ensure_ascii=False),
+    }
+
 
 def load_pool(path: Path) -> list[dict]:
+    """Full problem pool — no confidence filter (all_problems is already curated)."""
     with path.open(encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     kept = []
     for r in rows:
         dim = (r.get("problem_dimension") or "").strip().lower()
         text = (r.get("problem_text") or "").strip()
-        conf = (r.get("confidence") or "").strip().lower()
         if not dim or dim == "none" or not text:
             continue
-        if conf and conf != "high":
+        if dim == "phase":
             continue
         kept.append(r)
     return kept
+
+
+def load_l1_records(path: Path) -> list[dict]:
+    rows = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            dim = (obj.get("dimension") or "").strip().lower()
+            if not dim or dim == "phase":
+                continue
+            rows.append(obj)
+    return rows
 
 
 def turn_key(row: dict) -> str:
     return f"{row.get('conversation_id', '')}::{row.get('turn_id', '')}"
 
 
-def sample_pilot(pool: list[dict], per_dim: int, seed: int | None) -> list[dict]:
-    rng = random.Random(seed)
+def index_pool_by_dim(pool: list[dict]) -> dict[str, list[dict]]:
     by_dim: dict[str, list[dict]] = defaultdict(list)
     for r in pool:
-        by_dim[(r.get("problem_dimension") or "").strip().lower()].append(r)
-
-    pilot: list[dict] = []
-    for dim in sorted(by_dim):
-        rows = by_dim[dim][:]
-        rng.shuffle(rows)
-        # Prefer vocal_lead when available, but still fill quota
-        vocal = [r for r in rows if str(r.get("vocal_lead", "")).lower() == "true"]
-        other = [r for r in rows if str(r.get("vocal_lead", "")).lower() != "true"]
-        ordered = vocal + other
-        # Dedupe by turn within dim
-        seen = set()
-        picked = []
-        for r in ordered:
-            k = turn_key(r)
-            if k in seen:
-                continue
-            seen.add(k)
-            picked.append(r)
-            if len(picked) >= per_dim:
-                break
-        pilot.extend(picked)
-
-    rng.shuffle(pilot)
-    return pilot
+        dim = (r.get("problem_dimension") or "").strip().lower()
+        by_dim[dim].append(r)
+    return by_dim
 
 
 def pick_exemplars(
-    pool: list[dict],
-    dim: str,
-    exclude_key: str,
+    candidates: list[dict],
     n: int,
     rng: random.Random,
+    *,
+    target_source: str | None = None,
+    target_dim: str | None = None,
+    top_k: int = 12,
 ) -> list[dict]:
-    cands = [
-        r
-        for r in pool
-        if (r.get("problem_dimension") or "").strip().lower() == dim
-        and turn_key(r) != exclude_key
-        and (r.get("problem_text") or "").strip()
-    ]
+    """Random same-dim exemplars. Controlled only by --seed (no quality ranking)."""
+    del target_source, target_dim, top_k  # kept for call-site compat; unused
+    if not candidates:
+        return []
+    cands = candidates[:]
     rng.shuffle(cands)
-    return cands[:n]
+    seen: set[str] = set()
+    picked: list[dict] = []
+    for r in cands:
+        k = turn_key(r)
+        if k in seen:
+            continue
+        seen.add(k)
+        picked.append(r)
+        if len(picked) >= n:
+            break
+    return picked
 
 
-def parse_dialogue(raw: str) -> tuple[str, str]:
-    """Extract Amateur / Expert quoted or plain lines from model output."""
+def l1_to_input_obj(rec: dict) -> dict:
+    texts = rec.get("texts") or {}
+    l1 = ""
+    if isinstance(texts, dict):
+        l1 = (texts.get("L1") or "").strip()
+    return {
+        "axis": (rec.get("axis") or "").strip().lower(),
+        "dim": (rec.get("dimension") or "").strip().lower(),
+        "subject": (rec.get("subject") or "").strip().lower(),
+        "source": (rec.get("source") or "").strip().lower(),
+        "severity": (rec.get("severity") or "medium").strip().lower(),
+        "l1": l1,
+    }
+
+
+def extract_json_obj(raw: str) -> dict:
     text = (raw or "").strip()
-    amateur = ""
-    expert = ""
+    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    brace = re.search(r"\{.*\}", text, re.DOTALL)
+    if brace:
+        return json.loads(brace.group(0))
+    raise json.JSONDecodeError("Expecting JSON object", text, 0)
 
-    # Prefer quoted forms
-    m_a = re.search(
-        r'Amateur\s*:\s*"([^"]*)"',
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    m_e = re.search(
-        r'Expert\s*:\s*"([^"]*)"',
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if m_a:
-        amateur = m_a.group(1).strip()
-    if m_e:
-        expert = m_e.group(1).strip()
 
+def parse_generation(raw: str) -> tuple[str, str, str]:
+    """Return amateur, expert, problem_state_text."""
+    obj = extract_json_obj(raw)
+    amateur = str(obj.get("amateur") or "").strip()
+    expert = str(obj.get("expert") or "").strip()
+    pst = str(obj.get("problem_state_text") or "").strip()
     if not amateur or not expert:
-        # Fallback: line-based
-        for line in text.splitlines():
-            s = line.strip()
-            if not amateur and re.match(r"(?i)^Amateur\s*:", s):
-                amateur = re.sub(r"(?i)^Amateur\s*:\s*", "", s).strip().strip('"')
-            elif not expert and re.match(r"(?i)^Expert\s*:", s):
-                expert = re.sub(r"(?i)^Expert\s*:\s*", "", s).strip().strip('"')
-
-    return amateur, expert
+        raise ValueError("JSON missing amateur/expert")
+    if not pst:
+        pst = amateur
+    return amateur, expert, pst
 
 
-def call_generate(llm, user_message: str) -> str:
+def call_generate(llm, system_prompt: str, user_message: str, temperature: float) -> str:
     resp = llm.create_chat_completion(
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        temperature=TEMPERATURE,
+        temperature=temperature,
         top_p=TOP_P,
         top_k=TOP_K,
         max_tokens=MAX_TOKENS,
+        response_format={"type": "json_object"},
     )
     return (resp["choices"][0]["message"]["content"] or "").strip()
 
 
 def purge_error_rows(path: Path) -> int:
-    """Drop rows with error so a re-run can retry them (keep successful rows)."""
     if not path.exists():
         return 0
     with path.open(encoding="utf-8-sig", newline="") as f:
@@ -211,10 +307,12 @@ def load_done_ids(path: Path) -> set[str]:
     done = set()
     with path.open(encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
-            pid = (row.get("pilot_id") or "").strip()
+            pid = (row.get("l1_segment_id") or "").strip()
             err = (row.get("error") or "").strip()
-            if pid and not err:
-                done.add(pid)
+            mode = (row.get("style_mode") or "").strip()
+            content = (row.get("exemplar_content") or "").strip()
+            if pid and mode and not err:
+                done.add(f"{pid}::{mode}::{content}" if content else f"{pid}::{mode}")
     return done
 
 
@@ -234,146 +332,147 @@ def append_raw(path: Path, obj: dict) -> None:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="L2 style-transfer generation (pilot)")
-    parser.add_argument("--pool", type=Path, default=DEFAULT_POOL)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--per-dim", type=int, default=4, help="max pilot rows per dimension")
-    parser.add_argument("--n-exemplars", type=int, default=2)
-    parser.add_argument("--limit", type=int, default=None, help="only first N pilot rows")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
-    parser.add_argument("--n-ctx", type=int, default=N_CTX)
-    parser.add_argument("--n-gpu-layers", type=int, default=-1)
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="delete existing output and regenerate",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="sample pilot and print prompts only (no model load)",
-    )
-    args = parser.parse_args()
-
-    if not args.pool.is_file():
-        sys.exit(f"找不到 pool: {args.pool}")
-
-    pool = load_pool(args.pool)
-    print(f"Pool (confidence=high): {len(pool)} rows from {args.pool.name}")
-
-    pilot = sample_pilot(pool, per_dim=args.per_dim, seed=args.seed)
-    if args.limit is not None:
-        pilot = pilot[: args.limit]
-    print(f"Pilot size: {len(pilot)} (per_dim={args.per_dim}, seed={args.seed})")
-
-    by_dim: dict[str, int] = defaultdict(int)
-    for r in pilot:
-        by_dim[(r.get("problem_dimension") or "").strip().lower()] += 1
-    for dim, n in sorted(by_dim.items()):
-        print(f"  {dim:<22} {n}")
-
-    out_csv: Path = args.output
+def run_mode(
+    *,
+    mode: str,
+    exemplar_content: str,
+    temperature: float,
+    l1_rows: list[dict],
+    by_dim: dict[str, list[dict]],
+    n_exemplars: int,
+    seed: int,
+    out_csv: Path,
+    overwrite: bool,
+    dry_run: bool,
+    llm,
+) -> int:
+    tag_prefix = variant_tag(mode, exemplar_content)
     raw_jsonl = out_csv.with_name(out_csv.stem + "_raw.jsonl")
-
-    if args.overwrite:
+    if overwrite:
         for p in (out_csv, raw_jsonl):
             if p.exists():
                 p.unlink()
-                print(f"--overwrite: deleted {p.name}")
+                print(f"[{tag_prefix}] --overwrite: deleted {p.name}")
     else:
         removed = purge_error_rows(out_csv)
         if removed:
-            print(f"Purged {removed} error row(s) for retry")
+            print(f"[{tag_prefix}] purged {removed} error row(s)")
 
     done = load_done_ids(out_csv)
     if done:
-        print(f"Resume: skipping {len(done)} finished pilot_id(s)")
+        print(f"[{tag_prefix}] resume: skip {len(done)} done ids")
 
-    rng = random.Random(args.seed)
-    llm = None
-    if not args.dry_run:
-        llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
-
+    rng = random.Random(seed)
+    system_prompt = system_prompt_for_mode(mode)
     failures = 0
-    for i, row in enumerate(pilot, 1):
-        src_key = turn_key(row)
-        pilot_id = f"{src_key}::{(row.get('problem_dimension') or '').strip().lower()}"
-        tag = f"[{i}/{len(pilot)}] {pilot_id}"
 
-        if pilot_id in done:
+    for i, rec in enumerate(l1_rows, 1):
+        seg_id = (rec.get("segment_id") or f"l1_{i}").strip()
+        done_key = f"{seg_id}::{mode}::{exemplar_content}"
+        tag = f"[{tag_prefix} {i}/{len(l1_rows)}] {seg_id}"
+        if done_key in done:
             print(f"{tag} done, skip")
             continue
 
-        dim = (row.get("problem_dimension") or "").strip().lower()
-        axis = (row.get("problem_axis") or "").strip().lower()
-        stem = (row.get("problem_stem") or "").strip().lower()
-        subject = stem_to_subject(stem)
-        severity = "medium"
-        input_obj = {
-            "axis": axis,
-            "dim": dim,
-            "subject": subject,
-            "severity": severity,
-        }
+        input_obj = l1_to_input_obj(rec)
+        dim = input_obj["dim"]
+        l1_text = input_obj.get("l1") or ""
+        cands = by_dim.get(dim, [])
+        if not cands:
+            failures += 1
+            row = {
+                "l1_segment_id": seg_id,
+                "l1_text": l1_text,
+                "gold_axis": input_obj["axis"],
+                "gold_dim": dim,
+                "gold_subject": input_obj["subject"],
+                "source_instrument": input_obj["source"],
+                "severity": input_obj["severity"],
+                "style_mode": mode,
+                "exemplar_content": exemplar_content,
+                "temperature": temperature,
+                **pack_exemplar_fields([]),
+                "input_json": json.dumps(input_obj, ensure_ascii=False),
+                "amateur_text": "",
+                "expert_text": "",
+                "generated_dialogue": "",
+                "problem_state_text": "",
+                "error": f"no_style_pool for dim={dim}",
+            }
+            if not dry_run:
+                append_row(out_csv, row)
+            print(f"{tag} ERROR: no style pool for dim={dim}")
+            continue
 
-        exemplars = pick_exemplars(pool, dim, src_key, args.n_exemplars, rng)
-        user_prompt = build_user_prompt(input_obj, exemplars)
-        exemplar_ids = ";".join(turn_key(e) for e in exemplars)
+        exemplars = pick_exemplars(
+            cands,
+            n_exemplars,
+            rng,
+            target_source=input_obj.get("source"),
+            target_dim=dim,
+        )
+        user_prompt = build_user_prompt(
+            input_obj,
+            exemplars,
+            l1_text=l1_text,
+            mode=mode,
+            exemplar_content=exemplar_content,
+        )
+        style_packed = pack_exemplar_fields(exemplars)
 
         base = {
-            "pilot_id": pilot_id,
-            "source_conversation_id": row.get("conversation_id", ""),
-            "source_turn_id": row.get("turn_id", ""),
-            "source_split": row.get("split", ""),
-            "gold_axis": axis,
+            "l1_segment_id": seg_id,
+            "l1_text": l1_text,
+            "gold_axis": input_obj["axis"],
             "gold_dim": dim,
-            "gold_stem": stem,
-            "subject": subject,
-            "severity": severity,
-            "vocal_lead": row.get("vocal_lead", ""),
-            "source_problem_text": row.get("problem_text", ""),
-            "exemplar_ids": exemplar_ids,
+            "gold_subject": input_obj["subject"],
+            "source_instrument": input_obj["source"],
+            "severity": input_obj["severity"],
+            "style_mode": mode,
+            "exemplar_content": exemplar_content,
+            "temperature": temperature,
+            **style_packed,
             "input_json": json.dumps(input_obj, ensure_ascii=False),
             "amateur_text": "",
             "expert_text": "",
             "generated_dialogue": "",
+            "problem_state_text": "",
             "error": "",
         }
 
-        if args.dry_run:
-            print(f"\n===== {tag} =====")
-            print(user_prompt[:800], "..." if len(user_prompt) > 800 else "")
+        if dry_run:
+            print(f"\n===== {tag} temp={temperature} =====")
+            print(user_prompt[:900], "..." if len(user_prompt) > 900 else "")
             continue
 
         raw_reply = ""
         try:
-            assert llm is not None
             t0 = time.perf_counter()
-            raw_reply = call_generate(llm, user_prompt)
+            raw_reply = call_generate(llm, system_prompt, user_prompt, temperature)
             elapsed = time.perf_counter() - t0
-            amateur, expert = parse_dialogue(raw_reply)
-            if not amateur or not expert:
-                raise ValueError("failed to parse Amateur/Expert from model output")
+            amateur, expert, pst = parse_generation(raw_reply)
             dialogue = f'Amateur: "{amateur}"\nExpert: "{expert}"'
             base["amateur_text"] = amateur
             base["expert_text"] = expert
             base["generated_dialogue"] = dialogue
+            base["problem_state_text"] = pst
             append_row(out_csv, base)
             append_raw(
                 raw_jsonl,
                 {
-                    "pilot_id": pilot_id,
+                    "l1_segment_id": seg_id,
+                    "style_mode": mode,
+                    "exemplar_content": exemplar_content,
+                    "temperature": temperature,
                     "input_json": input_obj,
-                    "exemplar_ids": exemplar_ids,
+                    "style_turn_ids": style_packed["style_turn_ids"],
+                    "style_exemplars": json.loads(style_packed["style_exemplars_json"]),
                     "user_prompt": user_prompt,
                     "raw_reply": raw_reply,
                     "elapsed_s": round(elapsed, 2),
                 },
             )
-            print(f"{tag} ok ({elapsed:.1f}s) A={amateur[:60]!r}...")
+            print(f"{tag} ok ({elapsed:.1f}s) pst={pst[:50]!r}...")
         except Exception as e:
             failures += 1
             base["error"] = str(e)
@@ -382,22 +481,139 @@ def main() -> None:
             append_raw(
                 raw_jsonl,
                 {
-                    "pilot_id": pilot_id,
+                    "l1_segment_id": seg_id,
+                    "style_mode": mode,
+                    "exemplar_content": exemplar_content,
                     "error": str(e),
+                    "style_turn_ids": style_packed["style_turn_ids"],
+                    "style_exemplars": json.loads(style_packed["style_exemplars_json"]),
                     "user_prompt": user_prompt,
                     "raw_reply": raw_reply,
                 },
             )
             print(f"{tag} ERROR: {e}")
 
+    return failures
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "L2 from L1 + MixAssist style pool "
+            "(modes × exemplar_content; fixed low temperature)"
+        )
+    )
+    parser.add_argument("--l1", type=Path, default=DEFAULT_L1)
+    parser.add_argument("--pool", type=Path, default=DEFAULT_POOL)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--modes",
+        nargs="+",
+        choices=list(VALID_MODES),
+        default=["retarget", "strict", "free"],
+        help="Rewrite policy: retarget | strict | free",
+    )
+    parser.add_argument(
+        "--exemplar-content",
+        choices=list(VALID_EXEMPLAR_CONTENTS),
+        default="raw",
+        help="What MixAssist text to feed: problem_text | raw (default raw)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=FIXED_TEMPERATURE,
+        help=f"Shared temperature for all modes (default {FIXED_TEMPERATURE})",
+    )
+    parser.add_argument(
+        "--n-exemplars",
+        type=int,
+        default=1,
+        help="Style exemplars per L1 row (default 1; retarget always uses 1)",
+    )
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=123,
+        help="Exemplar sampling seed (default 123; change to reshuffle MixAssist refs)",
+    )
+    parser.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
+    parser.add_argument("--n-ctx", type=int, default=N_CTX)
+    parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print prompts only; no model load",
+    )
+    args = parser.parse_args()
+
+    if not args.l1.is_file():
+        sys.exit(f"找不到 L1: {args.l1}")
+    if not args.pool.is_file():
+        sys.exit(f"找不到 pool: {args.pool}")
+
+    l1_rows = load_l1_records(args.l1)
+    if args.limit is not None:
+        l1_rows = l1_rows[: args.limit]
+    pool = load_pool(args.pool)
+    by_dim = index_pool_by_dim(pool)
+
+    print(f"L1 records: {len(l1_rows)} from {args.l1.name}")
+    print(f"Style pool: {len(pool)} rows from {args.pool.name} (no confidence filter)")
+    print(f"exemplar_content={args.exemplar_content}  temperature={args.temperature}")
+    print("Pool coverage:")
+    for dim in sorted(by_dim):
+        print(f"  {dim:<22} {len(by_dim[dim])}")
+    missing = sorted(
+        {(r.get("dimension") or "").strip().lower() for r in l1_rows} - set(by_dim)
+    )
+    if missing:
+        print(f"WARNING: L1 dims with empty pool: {missing}")
+
+    llm = None
+    if not args.dry_run:
+        llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+
+    total_fail = 0
+    written: list[Path] = []
+    for mode in args.modes:
+        out_csv = output_csv_path(args.output_dir, mode, args.exemplar_content)
+        written.append(out_csv)
+        n_ex = args.n_exemplars
+        if mode == "retarget" and n_ex != 1:
+            print(
+                f"[{mode}] forcing n_exemplars=1 "
+                f"(was {n_ex}; retarget rewrites a single MixAssist turn)"
+            )
+            n_ex = 1
+        print(
+            f"\n=== mode={mode} exemplar_content={args.exemplar_content} "
+            f"temp={args.temperature} → {out_csv.name} ==="
+        )
+        total_fail += run_mode(
+            mode=mode,
+            exemplar_content=args.exemplar_content,
+            temperature=args.temperature,
+            l1_rows=l1_rows,
+            by_dim=by_dim,
+            n_exemplars=n_ex,
+            seed=args.seed,
+            out_csv=out_csv,
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+            llm=llm,
+        )
+
     if args.dry_run:
         print("\nDry-run only — no model calls.")
         return
 
-    print(f"\nDone → {out_csv}")
-    print(f"Raw  → {raw_jsonl}")
-    if failures:
-        print(f"Failures: {failures} (re-run same command to retry error rows)")
+    print(f"\nDone. Failures (rows): {total_fail}")
+    for p in written:
+        print(f"  {p}")
 
 
 if __name__ == "__main__":

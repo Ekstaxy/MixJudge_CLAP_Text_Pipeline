@@ -63,13 +63,15 @@ MixAssist CSV (train / validation / test)
 ├── scripts/
 │   ├── export_problem_pool.py
 │   ├── analyze_labels.py
-│   └── analyze_vocal.py
+│   ├── analyze_vocal.py
+│   └── compare_l2_labels.py
 └── src/
     ├── labeling/
     │   ├── labeling_common.py    # schema / I/O / parse / normalize
     │   ├── labeling_hf.py        # Hugging Face transformers
     │   ├── labeling_gguf.py      # llama.cpp GGUF
-    │   └── labeling_groq.py      # Groq API
+    │   ├── labeling_groq.py      # Groq API
+    │   └── label_l2_generated.py # re-label L2 dialogues (consistency check)
     ├── prompts/
     │   ├── labeling_prompt.py
     │   └── l2_generation_prompt.py
@@ -92,6 +94,8 @@ MixAssist CSV (train / validation / test)
 | `scripts/export_problem_pool.py` | 過濾有效 problem 列，寫出 `*_problems.csv` 與 `*_all_problems.csv` |
 | `scripts/analyze_labels.py` | 覆蓋率、axis / dimension 分佈、抽樣檢視 |
 | `src/generate_l2_style.py` | 以 problem pool 為 gold + few-shot，生成 Amateur / Expert 對話 |
+| `src/labeling/label_l2_generated.py` | 對 L2 生成對話再跑 labeling（同 GGUF / prompt），輸出 `labeled_l2_gguf_{mode}.csv` |
+| `scripts/compare_l2_labels.py` | 比對 L1 gold vs 再標結果，輸出 dim / axis 一致率 |
 
 ---
 
@@ -125,8 +129,27 @@ python scripts/export_problem_pool.py
 # 3) 統計
 python scripts/analyze_labels.py
 
-# 4) L2 生成（pilot）
-python src/generate_l2_style.py --limit 3
+# 4) L2 生成（pilot）— 固定 temp=0.1；只用 MixAssist raw；鬆緊靠 mode
+python src/generate_l2_style.py --modes retarget strict free \
+  --exemplar-content raw --n-exemplars 1 --overwrite
+# 或一次跑完 generate + re-label + compare:
+bash scripts/run_l2_raw_variants.sh
+
+# 5) 對生成對話再標註（驗證是否仍符合 L1 axis/dim）
+python src/labeling/label_l2_generated.py \
+  --inputs outputs/l2_from_l1_retarget_raw.csv \
+           outputs/l2_from_l1_strict_raw.csv \
+           outputs/l2_from_l1_free_raw.csv \
+  --overwrite
+
+# 6) 比對 gold vs 再標一致率
+for mode in retarget strict free; do
+  tag="${mode}_raw"
+  python scripts/compare_l2_labels.py \
+    --l2 "outputs/l2_from_l1_${tag}.csv" \
+    --labeled "outputs/labeled_l2_gguf_${tag}.csv" \
+    --report "outputs/l2_label_agreement_${tag}.md"
+done
 ```
 
 Groq 版需設定 `GROQ_API_KEY` 後執行 `python src/labeling/labeling_groq.py`。
