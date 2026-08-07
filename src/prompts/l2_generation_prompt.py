@@ -37,23 +37,26 @@ The mixing problem (problem_state_text) may appear in either line.
 SYSTEM_PROMPT_RETARGET = f"""\
 You are a professional audio-engineering dialogue editor doing RETARGET rewrite.
 
-Goal: keep MixAssist *tone* (hedges, fillers, short confirmations) while making the
-dialogue label as L1.dim on L1.source with HIGH precision — as if a strict MixAssist
-labeler reads it.
+Goal: near-copy ONE MixAssist turn. Keep the original wording, hedges, fillers, and
+sentence shape. Change ONLY the instrument / party words so the turn is about
+L1.source / L1.subject and still means L1.dim.
 
 {_ROLES}
 RETARGET rules (highest priority first):
-1. Keep L1 axis/dim/subject/severity EXACTLY. Output must support ONE primary fault:
-   L1.dim about L1.source. A labeler should NOT also recover a different dim.
-2. Anchor on the labeled problem_text: stem-swap it to L1.source / L1.subject and make
-   that span the clearest problem statement (prefer early in Amateur or Expert).
-3. Raw AMATEUR/EXPERT is for tone only. DELETE or rewrite away competing mix talk
-   (other stems, reverb/tail/shimmer, EQ workflow, "pretty quiet", long tails, etc.)
-   unless that talk is required to express L1.dim itself.
-4. Keep dialogue SHORT: about 1–3 sentences for Amateur and 1–3 for Expert. Do not
-   paste the whole MixAssist turn. Filler is OK; long session narration is not.
-5. Both amateur and expert must be non-empty.
-6. problem_state_text: short span of L1.dim after retarget (not a caption dump).
+1. Almost verbatim copy of Exemplar 1. Prefer the raw AMATEUR / EXPERT lines when
+   provided; otherwise copy problem_text into the speaker who carries the fault.
+2. Swap ONLY stems / party names that conflict with L1.source / L1.subject
+   (e.g. keys→lead vocal, toms→band, cymbals→lead vocal). Keep everything else:
+   fillers ("yeah", "I guess", "like"), rhythm, length, confirmations.
+3. Do NOT invent a new short dialogue from L1 caption. Do NOT paraphrase into
+   generic "I don't know, it feels like…". If the exemplar is long, the output
+   should stay similarly long.
+4. Keep L1 axis/dim/subject/severity meaning. Stem-swap so the labeled fault still
+   reads as L1.dim about L1.source (not the exemplar's original stem).
+5. Both amateur and expert must be non-empty. If one raw side is empty/trivial,
+   keep that side's wording and put the stem-swapped fault on the side that has it;
+   if needed, add a minimal confirmation on the empty side — do not rewrite both sides.
+6. problem_state_text: short span of the stem-swapped L1.dim fault after retarget.
 
 {OUTPUT_SCHEMA}
 """
@@ -162,10 +165,11 @@ def build_user_prompt(
         if include_raw:
             parts.append(
                 "RETARGET + RAW:\n"
-                "- Make problem_text (stem-swapped to L1.source) the PRIMARY clear fault.\n"
-                "- Keep only light MixAssist filler from raw; DO NOT paste the full turn.\n"
-                "- Remove competing defects (reverb/tail/other stems/other dims).\n"
-                "- Short dialogue; both sides non-empty; a labeler should return L1.dim first.\n"
+                "- COPY Exemplar 1 AMATEUR/EXPERT nearly verbatim (keep length & fillers).\n"
+                "- Swap ONLY instrument/party words to L1.source / L1.subject.\n"
+                "- Stem-swap problem_text the same way so the fault still means L1.dim.\n"
+                "- Do NOT invent a new dialogue from the L1 caption.\n"
+                "- Do NOT shorten into a generic 1–2 sentence rewrite.\n"
             )
         else:
             parts.append(
@@ -205,11 +209,16 @@ def build_user_prompt(
         f"(subject={input_obj.get('subject', '')!r})."
     )
 
-    if include_raw:
+    if include_raw and mode != "retarget":
         parts.append(
             "RAW SAFETY: surrounding MixAssist talk may mention other instruments/faults; "
             "those are NOT to be preserved. Only the labeled problem_text fault (same dim "
             "as L1) should remain after rewrite."
+        )
+    elif include_raw and mode == "retarget":
+        parts.append(
+            "RETARGET RAW NOTE: keep surrounding MixAssist wording; only stem-swap party "
+            "names to L1.source / L1.subject so the turn still reads as L1.dim."
         )
 
 
@@ -245,15 +254,15 @@ def build_user_prompt(
             'L1 Input: {"axis": "brightness", "dim": "harsh", "subject": "figure", '
             '"source": "vocal", "severity": "medium"}'
         )
-        parts.append("Output (SHORT; stem cymbals→lead vocal; ONE fault only):")
+        parts.append("Output (near-copy; stem cymbals→lead vocal only):")
         if include_raw:
             out = {
                 "amateur": (
-                    "It seems like the lead vocal is too harsh up top, right? "
+                    "It seems like the lead vocal is too harsh up top to me, right? "
                     "Like, do you feel that too?"
                 ),
                 "expert": (
-                    "Yeah — I'd ease the top end on the lead vocal. Too harsh."
+                    "Yeah — I'd turn the lead vocal down a bit. Too harsh up top."
                 ),
                 "problem_state_text": "lead vocal is too harsh up top",
             }

@@ -3,10 +3,10 @@
 L2 style transfer — L1 structured records → Amateur/Expert dialogue (+ problem_state_text).
 
 Pipeline (current):
-  1. Read L1 JSONL (mock or future 学长 export): axis / dimension / subject / source / texts.L1
+  1. Read L1 JSONL (mock or future export): axis / dimension / subject / source / texts.L1
   2. Style pool = outputs/labeled_turns_gguf_all_problems.csv (FULL pool; no confidence filter)
   3. For each L1 row, randomly sample same-dimension MixAssist turns as style exemplars
-     (by problem_dimension only — no vocal preference)
+     (prefer single-dim turns; skip turns that also carry competing dims when possible)
   4. Generate under two orthogonal axes (fixed low temperature for prompt adherence):
        mode:             retarget | strict | free   (rewrite policy)
        exemplar_content: problem_text | raw         (what MixAssist text is fed)
@@ -197,6 +197,17 @@ def index_pool_by_dim(pool: list[dict]) -> dict[str, list[dict]]:
     return by_dim
 
 
+def index_dims_by_turn(pool: list[dict]) -> dict[str, set[str]]:
+    """All problem dims labeled on each MixAssist turn (for competing-dim gate)."""
+    out: dict[str, set[str]] = defaultdict(set)
+    for r in pool:
+        dim = (r.get("problem_dimension") or "").strip().lower()
+        if not dim or dim == "none":
+            continue
+        out[turn_key(r)].add(dim)
+    return out
+
+
 def pick_exemplars(
     candidates: list[dict],
     n: int,
@@ -205,12 +216,25 @@ def pick_exemplars(
     target_source: str | None = None,
     target_dim: str | None = None,
     top_k: int = 12,
+    dims_by_turn: dict[str, set[str]] | None = None,
 ) -> list[dict]:
-    """Random same-dim exemplars. Controlled only by --seed (no quality ranking)."""
-    del target_source, target_dim, top_k  # kept for call-site compat; unused
+    """Random same-dim exemplars. Prefer turns with only target_dim (no competing labels).
+
+    Gate A: if the MixAssist turn also carries other problem_dimensions, skip it when
+    any single-dim turn exists for target_dim. Falls back to multi-dim turns only when
+    the pool has no clean turn for that dim. Still random among the allowed set (--seed).
+    """
+    del target_source, top_k  # kept for call-site compat; unused
     if not candidates:
         return []
     cands = candidates[:]
+    td = (target_dim or "").strip().lower()
+    if td and dims_by_turn is not None:
+        clean = [
+            r for r in cands if dims_by_turn.get(turn_key(r), set()) == {td}
+        ]
+        if clean:
+            cands = clean
     rng.shuffle(cands)
     seen: set[str] = set()
     picked: list[dict] = []
@@ -339,6 +363,7 @@ def run_mode(
     temperature: float,
     l1_rows: list[dict],
     by_dim: dict[str, list[dict]],
+    dims_by_turn: dict[str, set[str]],
     n_exemplars: int,
     seed: int,
     out_csv: Path,
@@ -362,7 +387,6 @@ def run_mode(
     if done:
         print(f"[{tag_prefix}] resume: skip {len(done)} done ids")
 
-    rng = random.Random(seed)
     system_prompt = system_prompt_for_mode(mode)
     failures = 0
 
@@ -404,12 +428,15 @@ def run_mode(
             print(f"{tag} ERROR: no style pool for dim={dim}")
             continue
 
+        # Per-record RNG: same seed + segment → same exemplars across modes.
+        row_rng = random.Random(f"{seed}|{seg_id}|{dim}|{n_exemplars}")
         exemplars = pick_exemplars(
             cands,
             n_exemplars,
-            rng,
+            row_rng,
             target_source=input_obj.get("source"),
             target_dim=dim,
+            dims_by_turn=dims_by_turn,
         )
         user_prompt = build_user_prompt(
             input_obj,
@@ -560,13 +587,16 @@ def main() -> None:
         l1_rows = l1_rows[: args.limit]
     pool = load_pool(args.pool)
     by_dim = index_pool_by_dim(pool)
+    dims_by_turn = index_dims_by_turn(pool)
 
     print(f"L1 records: {len(l1_rows)} from {args.l1.name}")
     print(f"Style pool: {len(pool)} rows from {args.pool.name} (no confidence filter)")
     print(f"exemplar_content={args.exemplar_content}  temperature={args.temperature}")
-    print("Pool coverage:")
+    print("Pool coverage (rows / single-dim turns preferred by gate A):")
     for dim in sorted(by_dim):
-        print(f"  {dim:<22} {len(by_dim[dim])}")
+        turns = {turn_key(r) for r in by_dim[dim]}
+        single = sum(1 for t in turns if dims_by_turn.get(t) == {dim})
+        print(f"  {dim:<22} {len(by_dim[dim]):>4} rows  {single:>3}/{len(turns)} single-dim turns")
     missing = sorted(
         {(r.get("dimension") or "").strip().lower() for r in l1_rows} - set(by_dim)
     )
@@ -599,6 +629,7 @@ def main() -> None:
             temperature=args.temperature,
             l1_rows=l1_rows,
             by_dim=by_dim,
+            dims_by_turn=dims_by_turn,
             n_exemplars=n_ex,
             seed=args.seed,
             out_csv=out_csv,

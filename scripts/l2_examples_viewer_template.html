@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>L2 examples viewer</title>
+<style>
+:root { --bg:#0f1419; --panel:#1a2332; --text:#e7ecf3; --muted:#8b9bb4; --accent:#5b9fd4; --ok:#3d9a6a; --bad:#c45c5c; --line:#2a3548; }
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--text)}
+header{position:sticky;top:0;z-index:5;background:#0f1419ee;border-bottom:1px solid var(--line);padding:12px 16px;backdrop-filter:blur(8px)}
+h1{margin:0 0 8px;font-size:16px;font-weight:600}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+select,input,button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}
+button.active{border-color:var(--accent);color:var(--accent)}
+.meta{color:var(--muted);font-size:12px;margin-top:6px}
+main{padding:16px;max-width:1200px;margin:0 auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h2{margin:0 0 6px;font-size:15px}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;margin-right:6px}
+.badge.ok{background:#1e3d2f;color:#7dcea0}
+.badge.bad{background:#3d1e1e;color:#e8a0a0}
+.grid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px}
+@media(min-width:900px){.grid.modes{grid-template-columns:1fr 1fr 1fr}}
+.box{background:#121925;border:1px solid var(--line);border-radius:8px;padding:10px}
+.box h3{margin:0 0 6px;font-size:12px;color:var(--accent);text-transform:uppercase;letter-spacing:.04em}
+.role{color:var(--muted);font-size:11px;margin-top:8px}
+.t{white-space:pre-wrap;word-break:break-word}
+.nav{display:flex;gap:8px;margin-left:auto}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>L2 examples — style vs retarget / strict / free</h1>
+  <div class="controls">
+    <label>dim <select id="dim"></select></label>
+    <label>filter
+      <select id="filter">
+        <option value="all">all</option>
+        <option value="retarget_miss">retarget miss</option>
+        <option value="any_miss">any mode miss</option>
+        <option value="all_hit">all hit</option>
+      </select>
+    </label>
+    <div class="nav">
+      <button id="prev" type="button">← prev</button>
+      <button id="next" type="button">next →</button>
+      <span id="pos" class="meta"></span>
+    </div>
+  </div>
+  <div class="meta" id="summary"></div>
+</header>
+<main id="main"></main>
+<script>
+const DATA = __DATA__;
+let idx = 0;
+let view = [];
+
+function dimsOf() {
+  return [...new Set(DATA.map(d => d.gold_dim))];
+}
+function applyFilter() {
+  const dim = document.getElementById('dim').value;
+  const f = document.getElementById('filter').value;
+  view = DATA.filter(d => {
+    if (dim !== 'all' && d.gold_dim !== dim) return false;
+    const hits = Object.values(d.modes).map(m => m.hit);
+    if (f === 'retarget_miss') return !d.modes.retarget.hit;
+    if (f === 'any_miss') return hits.some(h => !h);
+    if (f === 'all_hit') return hits.every(h => h);
+    return true;
+  });
+  idx = 0;
+  render();
+}
+function render() {
+  const main = document.getElementById('main');
+  document.getElementById('summary').textContent =
+    `${view.length} shown / ${DATA.length} total · jaccard order should be retarget ≫ strict > free`;
+  document.getElementById('pos').textContent = view.length ? `${idx+1}/${view.length}` : '0/0';
+  if (!view.length) { main.innerHTML = '<p class="meta">No rows for this filter.</p>'; return; }
+  const d = view[idx];
+  const modeOrder = ['retarget','strict','free'];
+  const hitBadges = modeOrder.map(m => {
+    const hit = d.modes[m].hit;
+    return `<span class="badge ${hit?'ok':'bad'}">${m}: ${hit?'HIT':'MISS'} [${(d.modes[m].pred_dims||[]).join(', ')||'—'}]</span>`;
+  }).join('');
+  main.innerHTML = `
+  <div class="card">
+    <h2>${d.id}</h2>
+    <div class="meta">gold <b>${d.gold_axis}/${d.gold_dim}</b> · source <b>${d.source}</b> · style <b>${d.style_turn}</b></div>
+    <div style="margin-top:8px">${hitBadges}</div>
+    <div class="box" style="margin-top:10px">
+      <h3>L1</h3>
+      <div class="t">${esc(d.l1)}</div>
+      <div class="role">style problem_text</div>
+      <div class="t">${esc(d.style_pt)}</div>
+      <div class="role">style Amateur (raw)</div>
+      <div class="t">${esc(d.style_u)}</div>
+      <div class="role">style Expert (raw)</div>
+      <div class="t">${esc(d.style_a)}</div>
+    </div>
+    <div class="grid modes">
+      ${modeOrder.map(m => {
+        const x = d.modes[m];
+        return `<div class="box">
+          <h3>${m}</h3>
+          <div class="meta">${x.hit?'✓ dim_any':'✗ miss'} · pred: ${(x.pred_dims||[]).join(', ')||'—'}</div>
+          <div class="role">Amateur</div><div class="t">${esc(x.amateur)}</div>
+          <div class="role">Expert</div><div class="t">${esc(x.expert)}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));}
+document.getElementById('dim').innerHTML = '<option value="all">all</option>' + dimsOf().map(d=>`<option value="${d}">${d}</option>`).join('');
+document.getElementById('dim').onchange = applyFilter;
+document.getElementById('filter').onchange = applyFilter;
+document.getElementById('prev').onclick = () => { if(!view.length)return; idx=(idx-1+view.length)%view.length; render(); };
+document.getElementById('next').onclick = () => { if(!view.length)return; idx=(idx+1)%view.length; render(); };
+document.addEventListener('keydown', e => {
+  if (e.key==='ArrowLeft') document.getElementById('prev').click();
+  if (e.key==='ArrowRight') document.getElementById('next').click();
+});
+applyFilter();
+</script>
+</body>
+</html>
