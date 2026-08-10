@@ -19,3 +19,7 @@ from .l2_generation_prompt import (  # noqa: F401
     stem_to_subject,
     system_prompt_for_mode,
 )
+from .term_extract_prompt import (  # noqa: F401
+    SYSTEM_PROMPT as TERM_EXTRACT_SYSTEM_PROMPT,
+    build_extract_user_message,
+)
