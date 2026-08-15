@@ -46,6 +46,7 @@ from pathlib import Path
 from labeling.labeling_gguf import (  # noqa: E402
     DEFAULT_GGUF,
     load_llm,
+    parse_tensor_split,
 )
 from prompts.l2_generation_prompt import (  # noqa: E402
     VALID_EXEMPLAR_CONTENTS,
@@ -567,7 +568,24 @@ def main() -> None:
     )
     parser.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
     parser.add_argument("--n-ctx", type=int, default=N_CTX)
+    parser.add_argument(
+        "--n-batch",
+        type=int,
+        default=512,
+        help="llama.cpp n_batch (T4x2 OOM → try 256)",
+    )
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    parser.add_argument(
+        "--tensor-split",
+        type=parse_tensor_split,
+        default=None,
+        help="Multi-GPU proportions, e.g. 0.5,0.5 (Kaggle T4x2). Auto when >=2 GPUs.",
+    )
+    parser.add_argument(
+        "--no-tensor-split",
+        action="store_true",
+        help="Force single-GPU (disable auto multi-GPU split)",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -605,7 +623,15 @@ def main() -> None:
 
     llm = None
     if not args.dry_run:
-        llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+        llm = load_llm(
+            args.model_path,
+            args.n_ctx,
+            args.n_gpu_layers,
+            args.verbose,
+            n_batch=args.n_batch,
+            tensor_split=args.tensor_split,
+            disable_tensor_split=args.no_tensor_split,
+        )
 
     total_fail = 0
     written: list[Path] = []

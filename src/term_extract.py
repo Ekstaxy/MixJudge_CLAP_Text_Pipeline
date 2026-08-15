@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
 import sys
 import time
@@ -171,41 +170,8 @@ def compare_csv_path(output_dir: Path, level: str) -> Path:
     return output_dir / f"lexicon_review_compare_{level}.csv"
 
 
-# ====================== GGUF ======================
-def _prepare_cuda_libs() -> None:
-    """Preload CUDA 12 libs for llama-cpp (same as labeling_gguf)."""
-    import ctypes
-
-    nvidia_root = Path.home() / ".local/lib/python3.12/site-packages/nvidia"
-    must = [
-        Path("/usr/lib/x86_64-linux-gnu/libcuda.so.1"),
-        nvidia_root / "cuda_runtime/lib/libcudart.so.12",
-        nvidia_root / "nvjitlink/lib/libnvJitLink.so.12",
-        nvidia_root / "cublas/lib/libcublasLt.so.12",
-        nvidia_root / "cublas/lib/libcublas.so.12",
-    ]
-    extras = [str(p) for p in nvidia_root.glob("*/lib")]
-    host = ["/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]
-    old = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if p and "cuda/compat" not in p]
-    os.environ["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(host + extras + old))
-    for path in must:
-        ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-
-
-def load_llm(model_path: Path, n_ctx: int, n_gpu_layers: int, verbose: bool):
-    from llama_cpp import Llama
-
-    print(f"載入 GGUF → GPU: {model_path} (n_gpu_layers={n_gpu_layers}, n_ctx={n_ctx})")
-    llm = Llama(
-        model_path=str(model_path),
-        n_gpu_layers=n_gpu_layers,
-        n_ctx=n_ctx,
-        n_batch=N_BATCH,
-        n_ubatch=N_BATCH,
-        verbose=verbose,
-    )
-    print("模型載入完成。")
-    return llm
+# ====================== GGUF (delegates to labeling_gguf for Kaggle T4x2) ======================
+# load_llm / CUDA preload live in labeling.labeling_gguf (multi-GPU tensor_split).
 
 
 def call_llm(llm, system_prompt: str, user_message: str) -> str:
@@ -322,8 +288,23 @@ def aggregate_raw(output_dir: Path, splits: list[str]) -> dict:
 
 # ====================== extract ======================
 def cmd_extract(args: argparse.Namespace) -> None:
-    _prepare_cuda_libs()
-    llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+    # Lazy import so map/export do not pull llama-cpp / CUDA preload.
+    from labeling.labeling_gguf import load_llm, parse_tensor_split
+
+    tensor_split = (
+        args.tensor_split
+        if isinstance(args.tensor_split, list)
+        else parse_tensor_split(args.tensor_split)
+    )
+    llm = load_llm(
+        args.model_path,
+        args.n_ctx,
+        args.n_gpu_layers,
+        args.verbose,
+        n_batch=args.n_batch,
+        tensor_split=tensor_split,
+        disable_tensor_split=args.no_tensor_split,
+    )
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.seed is not None:
@@ -793,7 +774,19 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--seed", type=int, default=None)
     pe.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
     pe.add_argument("--n-ctx", type=int, default=N_CTX)
+    pe.add_argument("--n-batch", type=int, default=N_BATCH)
     pe.add_argument("--n-gpu-layers", type=int, default=N_GPU_LAYERS)
+    pe.add_argument(
+        "--tensor-split",
+        type=str,
+        default=None,
+        help="Multi-GPU proportions, e.g. 0.5,0.5 (Kaggle T4x2). Auto when >=2 GPUs.",
+    )
+    pe.add_argument(
+        "--no-tensor-split",
+        action="store_true",
+        help="Force single-GPU (disable auto multi-GPU split)",
+    )
     pe.add_argument("--verbose", action="store_true")
     pe.add_argument("--overwrite", action="store_true")
 
