@@ -5,14 +5,15 @@ MixAssist blind lexicon pipeline.
 Stages:
   1) extract  — Gemma (GGUF) dumps free-form (target, desc) pairs
   2) map      — hierarchical assign (centroid / clap):
-                  first 6 axes, then within that axis split into dims
-                  (masking has only 1 dim)
+                  first 7 axes, then within that axis split into dims
+                  (masking / clean have only 1 dim each)
   3) export   — review CSVs for axis and dimension (corrected_* empty)
 
 Lexicon taxonomy follows MixJudge caption ontology:
-  11 dims / 6 axes. stereo+phase retired; masking is one dim (not
-  swamping/invading). Independent of MixAssist labeling DIMENSION_TO_AXIS
-  until labeling is remapped separately.
+  12 classes = 11 problem dims + clean (no degradation on wet stem).
+  7 axes. stereo+phase retired; masking is one dim (not swamping/invading).
+  Independent of MixAssist labeling DIMENSION_TO_AXIS until labeling
+  is remapped separately.
 
 Usage (from repo root):
   python src/term_extract.py extract --splits train --limit 5
@@ -64,7 +65,8 @@ DEFAULT_EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 DEFAULT_CLAP_MODEL = "laion/clap-htsat-unfused"
 
 # MixJudge caption ontology — axes kept only for hierarchical map (axis→dim).
-# Fine-tune SEED_WORDS_* below; dim names must stay aligned with LEXICON_BRIEF §1.
+# Fine-tune SEED_WORDS_* below; dim names must stay aligned with LEXICON_BRIEF §1
+# (+ clean: fault-free / no degradation).
 DIMENSION_TO_AXIS = {
     "too_quiet": "level",
     "too_loud": "level",
@@ -77,6 +79,7 @@ DIMENSION_TO_AXIS = {
     "over_compressed": "dynamic",
     "under_compressed": "dynamic",
     "masking": "masking",
+    "clean": "clean",
 }
 
 AXES = (
@@ -86,49 +89,61 @@ AXES = (
     "space",
     "dynamic",
     "masking",
+    "clean",
 )
 
 DIMENSIONS = tuple(DIMENSION_TO_AXIS.keys())
 
-# axis → dims (pairs of 2; masking → 1)
+# axis → dims (pairs of 2; masking / clean → 1)
 AXIS_TO_DIMS: dict[str, tuple[str, ...]] = {}
 for _dim, _axis in DIMENSION_TO_AXIS.items():
     AXIS_TO_DIMS.setdefault(_axis, [])
     AXIS_TO_DIMS[_axis].append(_dim)
 AXIS_TO_DIMS = {a: tuple(AXIS_TO_DIMS[a]) for a in AXES}
 
-# 6-axis seed anchors
+# 7-axis seed anchors
+# Adjustments below are driven only by misplaced descs in
+# lexicon_review_centroid_dim.csv (remove magnets / move wrong-dim hits).
 SEED_WORDS_AXIS = {
     "level": [
         "loud", "quiet", "too loud", "too quiet",
         "overpowering", "inaudible", "can't hear", "volume",
     ],
     "body": [
+        # removed "full" (pulled wide/wider → muddy), "lacks body" (pulled gives it some body → thin)
         "muddy", "muddiness", "mud", "thin", "boomy",
-        "full", "lacks body", "low-end mud", "thick",
+        "low-end mud", "thick",
     ],
     "brightness": [
+        # removed sparkly/shimmer (pulled sparkliness / add some sparkle → dull)
         "harsh", "bright", "too bright", "dull", "dark",
-        "sibilant", "piercing", "sparkly", "shimmer", "high end",
+        "sibilant", "piercing", "edgy", "fatiguing", "high end",
     ],
     "space": [
+        # removed airy / in a space (pulled airiness / give it some air → too_dry)
         "dry", "too dry", "wet", "too wet", "washed out",
-        "distant", "airy", "in a space", "closely miked", "too much reverb",
+        "distant", "closely miked", "too much reverb", "no reverb",
     ],
     "dynamic": [
-        "punchy", "flat", "squashed", "pumping", "tight",
+        # keep punchy here so punchier hits dynamic not brightness/harsh
+        "punchy", "punchier", "flat", "squashed", "pumping", "tight",
         "pinched", "over compressed", "no dynamics", "transient", "clicky",
     ],
     # competition / obstruction only — avoid bare loudness words (vs level)
     "masking": [
         "masked", "overcrowded", "drowned", "gets lost", "buried"
         "bleeding", "getting in the way", "covered by", "swamping", "muffled",
-    ]
+    ],
+    # fault-free / no degradation (wet stem untouched)
+    "clean": [
+        "clean", "balanced", "sits cleanly", "well balanced",
+        "clear and balanced", "no issues", "sounds good in the mix",
+        "natural and clear",
+    ],
 }
 
-# 11-dimension seed anchors (LEXICON_BRIEF §2/§4 distinguishability)
-# TODO(you): expand/trim per dim after reviewing map CSVs — especially
-# too_quiet vs masking, muddy vs dull, over vs under compressed.
+# 12 classes = 11 problem dims + clean
+# Seed edits from misplaced CSV descs only (not newly invented phrases).
 SEED_WORDS_DIM: dict[str, list[str]] = {
     "too_quiet": [
         "too quiet", "quiet", "barely audible", "inaudible",
@@ -142,20 +157,28 @@ SEED_WORDS_DIM: dict[str, list[str]] = {
         "muddy", "boomy", "boxy", "congested", "woolly", "thick in the low mids",
     ],
     "thin": [
-        "thin", "hollow", "weedy", "lacks body", "small and lacking body", "no weight",
+        # removed "lacks body" / "small and lacking body" — magnet for "gives it some body"
+        "thin", "hollow", "weedy", "no weight",
     ],
     "harsh": [
+        # CSV: bright / so bright / more bright were wrongly → dull; anchor them here
+        # (brighten / add some sparkle are wish phrases — not added as seeds)
         "harsh", "piercing", "brittle", "edgy", "fatiguing", "sibilant",
+        "bright", "too bright", "so bright", "more bright",
     ],
     "dull": [
-        "dull", "dark", "veiled", "lacking air", "no shine", "lidded",
+        # removed "lacking air" / "no shine" — magnets for brighten / add some sparkle / sparkliness
+        "dull", "dark", "veiled", "lidded",
     ],
     "too_wet": [
+        # CSV correctly had these on too_wet — reinforce
         "too wet", "washed out", "drowned in reverb", "swimming in ambience",
         "too much reverb", "distant and diffuse",
+        "super wet", "100% wet",
     ],
     "too_dry": [
-        "too dry", "bone dry", "no reverb", "without any ambience",
+        # removed "without any ambience" — magnet for airiness / give it some air / airy
+        "too dry", "bone dry", "no reverb",
         "disconnected from the room", "pasted on top of the mix",
     ],
     "over_compressed": [
@@ -163,14 +186,21 @@ SEED_WORDS_DIM: dict[str, list[str]] = {
         "pumping", "no dynamics", "crushed flat",
     ],
     "under_compressed": [
+        # CSV: punchier was wrongly → harsh; "needs compression" pulled wish phrasing
         "under compressed", "uneven", "jumping around in level",
-        "uncontrolled dynamics", "wildly inconsistent", "needs compression",
+        "uncontrolled", "wildly inconsistent",
+        "punchier", "a little bit punchier",
     ],
     # no "quiet" / "soft" / bare "buried" — those belong to too_quiet
     "masking": [
-        "masked", "obscured", "swallowed by the rest of the mix",
-        "covered up by a competing instrument",
-        "lost in a frequency clash", "buried under competing frequencies",
+        "masked", "overcrowded", "drowned", "gets lost", "buried"
+        "bleeding", "getting in the way", "covered by", "swamping", "muffled",
+    ],
+    # no fault; brief: "sits cleanly", "mix is balanced" (no slot grammar)
+    "clean": [
+        "clean", "balanced", "sits cleanly", "the mix is balanced",
+        "clear and balanced", "natural and clear", "sits well in the mix",
+        "no mix problems",
     ],
 }
 
@@ -441,7 +471,7 @@ def _hierarchical_assign(
     method: str,
     min_sim: float,
 ) -> list[dict]:
-    """Step1: nearest of 6 axes. Step2: nearest dim within that axis (masking: 1)."""
+    """Step1: nearest of 7 axes. Step2: nearest dim within that axis (masking/clean: 1)."""
     import numpy as np
 
     axis_sims = emb @ axis_mat.T  # (N, n_axes)
@@ -502,7 +532,7 @@ def map_centroid(
     def encode(texts: list[str]):
         return model.encode(texts, normalize_embeddings=True, show_progress_bar=False, batch_size=batch_size)
 
-    print("[centroid] hierarchical: 6 axes → then dims within axis (11 dims total)")
+    print("[centroid] hierarchical: 7 axes → then dims within axis (12 classes)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[centroid] embedding {len(descs)} unique descs ...")
@@ -546,7 +576,7 @@ def map_clap(
     def encode(texts: list[str]):
         return _clap_encode_texts(model, processor, texts, device, batch_size)
 
-    print("[clap] hierarchical: 6 axes → then dims within axis (11 dims total)")
+    print("[clap] hierarchical: 7 axes → then dims within axis (12 classes)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[clap] embedding {len(descs)} unique descs ...")
@@ -848,7 +878,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="map device (auto falls back to cpu if CUDA alloc fails)",
         )
 
-    add_map_args(sub.add_parser("map", help="Map descs: 6 axes → 11 MixJudge dims"))
+    add_map_args(sub.add_parser("map", help="Map descs: 7 axes → 12 MixJudge classes (11+clean)"))
     px = sub.add_parser("export", help="Write axis/dim review CSV(s)")
     add_io(px)
     px.add_argument("--method", choices=METHODS, default="both")

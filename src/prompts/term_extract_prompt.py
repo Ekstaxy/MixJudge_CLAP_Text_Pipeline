@@ -3,7 +3,7 @@
 
 IMPORTANT (for human review):
   This prompt must NOT mention the MixJudge axes/dims (level / body /
-  brightness / space / dynamic / masking, or the 11 signed dimensions).
+  brightness / space / dynamic / masking / clean, or the 12 classes).
   The model only dumps free-form (target, desc) pairs.
 """
 
