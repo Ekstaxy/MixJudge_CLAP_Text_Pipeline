@@ -9,11 +9,8 @@ Stages:
                   (masking / clean have only 1 dim each)
   3) export   — review CSVs for axis and dimension (corrected_* empty)
 
-Lexicon taxonomy follows MixJudge caption ontology:
-  12 classes = 11 problem dims + clean (no degradation on wet stem).
-  7 axes. stereo+phase retired; masking is one dim (not swamping/invading).
-  Independent of MixAssist labeling DIMENSION_TO_AXIS until labeling
-  is remapped separately.
+Lexicon taxonomy follows MixJudge caption ontology (same DIMENSION_TO_AXIS
+as labeling): 12 classes = 11 problem dims + clean; 7 axes.
 
 Usage (from repo root):
   python src/term_extract.py extract --splits train --limit 5
@@ -47,6 +44,7 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from labeling.labeling_common import (  # noqa: E402
+    DIMENSION_TO_AXIS,
     PROJECT_ROOT,
     SPLIT_FILES,
     STEM_ALIASES,
@@ -64,24 +62,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 DEFAULT_CLAP_MODEL = "laion/clap-htsat-unfused"
 
-# MixJudge caption ontology — axes kept only for hierarchical map (axis→dim).
-# Fine-tune SEED_WORDS_* below; dim names must stay aligned with LEXICON_BRIEF §1
-# (+ clean: fault-free / no degradation).
-DIMENSION_TO_AXIS = {
-    "too_quiet": "level",
-    "too_loud": "level",
-    "muddy": "body",
-    "thin": "body",
-    "harsh": "brightness",
-    "dull": "brightness",
-    "too_wet": "space",
-    "too_dry": "space",
-    "over_compressed": "dynamic",
-    "under_compressed": "dynamic",
-    "masking": "masking",
-    "clean": "clean",
-}
-
+# Axes / dims shared with labeling (MixJudge 12 classes). Seeds stay local.
 AXES = (
     "level",
     "body",

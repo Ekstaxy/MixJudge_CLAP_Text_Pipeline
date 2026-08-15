@@ -10,6 +10,9 @@ Exemplar content (orthogonal axis):
 - problem_text: feed only labeled problem_text spans
 - raw:          also feed full Amateur/Expert MixAssist lines
 
+L1 dims follow MixJudge 12 classes (11 problem + clean). Exemplar pool
+dims must match L1.dim.
+
 Temperature is fixed low in the generator so the model follows these rules;
 do not use temp as a substitute for mode.
 """
@@ -18,12 +21,28 @@ from __future__ import annotations
 
 import json
 
+# MixJudge classes (must match labeling_common.DIMENSION_TO_AXIS keys).
+VALID_L1_DIMS = (
+    "too_quiet",
+    "too_loud",
+    "muddy",
+    "thin",
+    "harsh",
+    "dull",
+    "too_wet",
+    "too_dry",
+    "over_compressed",
+    "under_compressed",
+    "masking",
+    "clean",
+)
+
 OUTPUT_SCHEMA = """\
 Return valid JSON only (no markdown fences), exactly:
 {
   "amateur": "client / opinion-giver line (conversational English)",
   "expert": "mixer / engineer line (conversational English)",
-  "problem_state_text": "short standalone span of the mixing problem (axis/dim meaning only); may come from either speaker — do not assume only expert or only amateur states it"
+  "problem_state_text": "short standalone span of the L1 dim meaning (fault OR clean/balanced state); may come from either speaker — do not assume only expert or only amateur states it"
 }
 """
 

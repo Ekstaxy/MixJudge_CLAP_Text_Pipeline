@@ -272,8 +272,7 @@ AXIS_ORDER = [
     "space",
     "dynamic",
     "masking",
-    "stereo",
-    "phase",
+    "clean",
 ]
 DIM_BY_AXIS = {
     "level": ["too_quiet", "too_loud"],
@@ -281,9 +280,8 @@ DIM_BY_AXIS = {
     "brightness": ["harsh", "dull"],
     "space": ["too_wet", "too_dry"],
     "dynamic": ["over_compressed", "under_compressed"],
-    "masking": ["swamping", "invading"],
-    "stereo": ["too_wide", "too_narrow"],
-    "phase": ["phase"],
+    "masking": ["masking"],
+    "clean": ["clean"],
 }
 
 

@@ -24,7 +24,7 @@ PLACEHOLDER_ASSISTANT = "I need more information before I can respond. Please el
 #       "has_problem": true/false,
 #       "problem_text": "原文句子,沒有則空字串",
 #       "problem_stem": "問題的 stem (固定清單,見 VALID_STEMS),沒有則空字串",
-#       "problem_dimension": "15 signed dimensions 之一或 none (axis 由 code 反查)",
+#       "problem_dimension": "12 classes 之一或 none (axis 由 code 反查)",
 #       "problem_speaker": "amateur / expert / 空字串",
 #       "vocal_lead": true/false (僅 lead vocal 為 true; backing vocals 為 false),
 #       "has_fix": true/false,
@@ -39,13 +39,12 @@ PLACEHOLDER_ASSISTANT = "I need more information before I can respond. Please el
 #   ]
 # }
 #
-# 8 axes (problem_axis 由 code 反查, LLM 只填 problem_dimension):
-#   level, body, brightness, space, dynamic, masking, stereo, phase
+# 7 axes (problem_axis 由 code 反查, LLM 只填 problem_dimension):
+#   level, body, brightness, space, dynamic, masking, clean
 #
-# problem_dimension 允許值 (14 signed + phase + none):
+# problem_dimension 允許值 (11 problem + clean + none):
 #   too_quiet, too_loud, muddy, thin, harsh, dull, too_wet, too_dry,
-#   over_compressed, under_compressed, swamping, invading,
-#   too_wide, too_narrow, phase, none
+#   over_compressed, under_compressed, masking, clean, none
 #
 # 禁止把 dimension 名稱當 axis (例如 harsh/muddy 是 dimension, 不是 axis)。
 #
@@ -76,8 +75,9 @@ EVIDENCE RULES
    has_problem=false, has_fix=true, and vice versa. If neither exists,
    return exactly one empty label (has_problem=false, has_fix=false,
    problem_dimension "none").
-4. Neutral statements ("that sounds great", "let's pick a section") are
-   neither problems nor fixes.
+4. Vague approval ("that sounds great", "this is fine", "perfect") with no
+   concrete sonic claim → none (neither problem nor clean). Explicit
+   clean/balanced/fault-free sonic state → clean (has_problem=true).
 INPUT HISTORY (auxiliary)
 - CURRENT TURN is primary. HISTORY helps judge stem, axis, and
   problem_dimension when the current wording is vague (pronouns, unfinished
@@ -99,18 +99,17 @@ INPUT HISTORY (auxiliary)
   elaborate." = expert did not speak. Same for filler-only messages.
 AFFECTED STEM vs ACTION TARGET (critical)
 - problem_stem = the instrument that is suffering / the perceptual problem
-  is about (what you cannot hear, what sounds wrong).
+  is about (what you cannot hear, what sounds wrong). For clean: the source
+  described as sitting cleanly / balanced.
 - fix_stem = the instrument you operate on (fader, EQ, mute, etc.).
 - They can differ. Example: HISTORY says snare is lost; CURRENT says
   the cymbal is filling highs and "pull that back" → problem_stem=snare,
-  problem_dimension=swamping, fix_stem=cymbals, fix_action=lower_level
+  problem_dimension=masking, fix_stem=cymbals, fix_action=lower_level
   or eq_cut. Do NOT set problem_stem=cymbals just because that is what
   you turn down — the cymbal is the cause/masker, not the problem stem.
-- For swamping: problem_stem is the victim (the source being covered up).
-  Name the aggressor/masker in label_reasoning (and usually as fix_stem if
-  that is what gets adjusted).
-- For invading: problem_stem is the source being intruded on / stepped on;
-  the aggressor is the source that feels too forward in the same space.
+- For masking: problem_stem is the victim (the source being covered up /
+  unable to cut through). Name the aggressor/masker in label_reasoning
+  (and usually as fix_stem if that is what gets adjusted).
 - If CURRENT only names the cause ("that cymbal") but HISTORY already
   established the affected source (snare lost), keep problem_stem as the
   affected source from HISTORY.
@@ -130,26 +129,29 @@ FIGURE vs BAND (vocal_lead)
   should be chosen from the wording of the complaint, not from whether
   the source is vocal or accompaniment.
 AXES AND DIMENSIONS (CRITICAL — use EXACT strings)
-There are exactly 8 axes. You output problem_dimension ONLY; code maps to
-problem_axis. NEVER output an axis name as problem_dimension.
+There are exactly 7 axes and 12 classes (11 problem + clean). You output
+problem_dimension ONLY; code maps to problem_axis. NEVER output an axis
+name as problem_dimension. Only use the strings in the table below (or none).
 | AXIS        | problem_dimension (pick ONE)              |
 | level       | too_quiet | too_loud                        |
 | body        | muddy     | thin                            |
 | brightness  | harsh     | dull                            |
 | space       | too_wet   | too_dry                         |
 | dynamic     | over_compressed | under_compressed          |
-| masking     | swamping  | invading                        |
-| stereo      | too_wide  | too_narrow                      |
-| phase       | phase (only one; no opposite)           |
+| masking     | masking (only one; no opposite)         |
+| clean       | clean (only one; fault-free state)      |
 | (none)      | none                                      |
 Meanings:
-- too_quiet: buried, weak, can't hear. | too_loud: dominant, overpowering.
-- muddy: too much low/low-mid — boomy, thick, cloudy.
-  | thin: lacks body/warmth, too lean.
-- harsh: piercing, gritty, fatiguing highs. | dull: dark, muffled, no air.
+- too_quiet: source level is down — buried, weak, can't hear (no competing
+  source named as the cause). | too_loud: dominant, overpowering, sticking
+  out / too forward in level (not competition-masking).
+- muddy: too much low/low-mid — boomy, thick, boxy, congested.
+  | thin: lacks body/warmth, hollow, weedy.
+- harsh: piercing, gritty, fatiguing highs / presence. | dull: dark,
+  muffled, veiled, no air up top.
 - too_wet: too much reverb/room/ambience; washed out, interrupts phrases.
-  | too_dry: too little reverb/room/ambience — dry, no air, reverb tail too
-  quiet to hear (includes drum room too quiet; backing-vocal reverb that
+  | too_dry: too little reverb/room/ambience — dry, disconnected, reverb
+  tail too quiet (includes drum room too quiet; backing-vocal reverb that
   needs to be audible / more "in the background" via wetness).
 - over_compressed: too much compression/limiting — squashed, flat, lifeless,
   pumping, energy lost BECAUSE of compression (fix often reduce_compression
@@ -157,11 +159,12 @@ Meanings:
   | under_compressed: uncontrolled / uneven dynamics OR lacks punch, snap,
   transient impact (needs compression or transient shaping; "could use more
   punch", "snappier", peaking/clicky inconsistent levels).
-- swamping: a competing source masks the victim; the victim can't cut through.
-  | invading: a source is too forward and intrudes on another source's space.
-- too_wide: unfocused, hollow center. | too_narrow: mono-ish, no width.
-- phase: cancellation, comb filtering, polarity issues.
-- none: no supported problem.
+- masking: a competing source covers the victim; victim can't cut through /
+  is obscured / lost in a frequency clash. Do NOT use bare loudness words
+  alone ("too quiet", "too soft") — those are too_quiet.
+- clean: explicit fault-free / balanced / sits cleanly claim (concrete sonic
+  state). Not vague "sounds good".
+- none: no supported problem and no clean claim.
 DECISION RULES
 - POLARITY CHECK (mandatory): dimension direction must match the complaint.
   "needs more ambience / too dry" = too_dry, NEVER too_wet; "too wet /
@@ -185,9 +188,12 @@ DECISION RULES
     send / tail).
   Do NOT label these as too_loud / too_quiet on vocal just because a
   fader or "volume" word appears on the reverb return.
-- swamping over too_quiet only when another source explicitly causes the
-  inaudibility (or HISTORY established that link). Simple volume with no
-  competing source → too_quiet / too_loud.
+- masking vs too_quiet (mandatory): use masking ONLY when another source
+  explicitly causes the inaudibility / covering (or HISTORY established
+  that link). Simple volume with no competing source → too_quiet /
+  too_loud. "Sticking out / too forward" with no competition framing →
+  too_loud (not masking).
+- If the complaint is not one of the listed dimensions → none.
 - DRUM ROOM vs OVERHEADS (mandatory):
   - Drum room / room mic / ambience / amb tracks: level or send amount of
     the room is SPACE (too_wet if too much room, too_dry if too little).

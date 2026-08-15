@@ -30,33 +30,23 @@ SPLIT_FILES = {
 DEFAULT_OUTPUT = PROJECT_ROOT / "outputs" / "labeled_turns.csv"
 MAX_NEW_TOKENS = 1024
 
-# 8 axes; LLM 只標 problem_dimension, problem_axis 由 code 反查
-# 參考框架: level, body, brightness, space, dynamic, masking, stereo, phase
+# MixJudge caption ontology (LEXICON_BRIEF): 7 axes, 12 classes
+# = 11 problem dims + clean. LLM 只標 problem_dimension; problem_axis 由 code 反查.
 DIMENSION_TO_AXIS = {
-    # level — figure (vocal) or any stem volume
     "too_quiet": "level",
     "too_loud": "level",
-    # body — muddy=bed only; thin=figure only
     "muddy": "body",
     "thin": "body",
-    # brightness — figure only
     "harsh": "brightness",
     "dull": "brightness",
-    # space
     "too_wet": "space",
-    "too_dry": "space",  # deprecated in recipes, still valid for dialogue
-    # dynamic — figure only
+    "too_dry": "space",
     "over_compressed": "dynamic",
     "under_compressed": "dynamic",
-    # masking — swamping=bed aggressor; invading=figure aggressor
-    "swamping": "masking",
-    "invading": "masking",
-    # stereo
-    "too_wide": "stereo",
-    "too_narrow": "stereo",
-    # phase — no direction
-    "phase": "phase",
+    "masking": "masking",
+    "clean": "clean",
 }
+
 VALID_DIMENSIONS = set(DIMENSION_TO_AXIS) | {"none"}
 VALID_CONFIDENCE = {"low", "mid", "high"}
 

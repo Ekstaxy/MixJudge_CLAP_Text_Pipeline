@@ -13,7 +13,7 @@ Pipeline (current):
   5. Model returns JSON: amateur, expert, problem_state_text
 
 Caveats:
-  - Dimension/axis follow MixJudge note + all_problems (14 signed dims). No phase.
+  - Dimension/axis follow MixJudge 12 classes (11 problem + clean).
   - Do NOT use labeled_turns_gguf_train.csv as the style pool (includes none/fix noise).
   - Exemplars often say guitar/drums; prompts must retarget to L1 source/subject.
   - muddy L1 should be bed-subject (carried-by), not vocal-only anchors.
@@ -47,6 +47,10 @@ from labeling.labeling_gguf import (  # noqa: E402
     DEFAULT_GGUF,
     load_llm,
     parse_tensor_split,
+)
+from labeling.labeling_common import (  # noqa: E402
+    DIMENSION_TO_AXIS,
+    normalize_dimension,
 )
 from prompts.l2_generation_prompt import (  # noqa: E402
     VALID_EXEMPLAR_CONTENTS,
@@ -161,12 +165,15 @@ def load_pool(path: Path) -> list[dict]:
         rows = list(csv.DictReader(f))
     kept = []
     for r in rows:
-        dim = (r.get("problem_dimension") or "").strip().lower()
+        dim = normalize_dimension(r.get("problem_dimension"))
         text = (r.get("problem_text") or "").strip()
-        if not dim or dim == "none" or not text:
+        if dim == "none" or not text:
             continue
-        if dim == "phase":
+        if dim not in DIMENSION_TO_AXIS:
             continue
+        r = dict(r)
+        r["problem_dimension"] = dim
+        r["problem_axis"] = DIMENSION_TO_AXIS[dim]
         kept.append(r)
     return kept
 
@@ -179,9 +186,12 @@ def load_l1_records(path: Path) -> list[dict]:
             if not line:
                 continue
             obj = json.loads(line)
-            dim = (obj.get("dimension") or "").strip().lower()
-            if not dim or dim == "phase":
+            dim = normalize_dimension(obj.get("dimension"))
+            if dim == "none" or dim not in DIMENSION_TO_AXIS:
                 continue
+            obj = dict(obj)
+            obj["dimension"] = dim
+            obj["axis"] = DIMENSION_TO_AXIS[dim]
             rows.append(obj)
     return rows
 
