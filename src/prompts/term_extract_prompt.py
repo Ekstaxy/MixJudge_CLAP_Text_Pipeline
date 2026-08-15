@@ -2,8 +2,8 @@
 """Blind term extraction prompts for MixAssist lexicon building.
 
 IMPORTANT (for human review):
-  This prompt must NOT mention the 8 mixing axes (level / body / brightness /
-  space / dynamic / masking / stereo / phase) or any signed dimensions.
+  This prompt must NOT mention the MixJudge axes/dims (level / body /
+  brightness / space / dynamic / masking, or the 11 signed dimensions).
   The model only dumps free-form (target, desc) pairs.
 """
 

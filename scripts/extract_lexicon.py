@@ -3,8 +3,10 @@
 
 JSON: only desc lists, padded with "" to top_n.
 
+Taxonomy: MixJudge 6 axes / 11 dims (same as src/term_extract.py map).
+
 Usage:
-  # 8 axes
+  # 6 axes
   python scripts/extract_lexicon.py \
     --level axis \
     --centroid outputs/lexicon_review_centroid_axis.csv \
@@ -13,7 +15,7 @@ Usage:
     --clap-out outputs/lexicon_top_clap_axis.json \
     --top-n 10
 
-  # 15 dimensions
+  # 11 dimensions
   python scripts/extract_lexicon.py \
     --level dim \
     --centroid outputs/lexicon_review_centroid_dim.csv \
@@ -38,8 +40,6 @@ AXES = (
     "space",
     "dynamic",
     "masking",
-    "stereo",
-    "phase",
 )
 
 DIMENSIONS = (
@@ -53,11 +53,7 @@ DIMENSIONS = (
     "too_dry",
     "over_compressed",
     "under_compressed",
-    "swamping",
-    "invading",
-    "too_wide",
-    "too_narrow",
-    "phase",
+    "masking",
 )
 
 
@@ -109,7 +105,7 @@ def write_one(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Top-N unique descs per axis/dim → JSON")
-    p.add_argument("--level", choices=("axis", "dim"), required=True, help="axis (8) or dim (15)")
+    p.add_argument("--level", choices=("axis", "dim"), required=True, help="axis (6) or dim (11)")
     p.add_argument("--centroid", type=Path, required=True)
     p.add_argument("--centroid-out", type=Path, required=True)
     p.add_argument("--clap", type=Path, required=True)

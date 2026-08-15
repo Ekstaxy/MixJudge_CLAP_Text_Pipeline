@@ -5,9 +5,14 @@ MixAssist blind lexicon pipeline.
 Stages:
   1) extract  — Gemma (GGUF) dumps free-form (target, desc) pairs
   2) map      — hierarchical assign (centroid / clap):
-                  first 8 axes, then within that axis split into its 2 dims
-                  (phase has only 1 dim)
+                  first 6 axes, then within that axis split into dims
+                  (masking has only 1 dim)
   3) export   — review CSVs for axis and dimension (corrected_* empty)
+
+Lexicon taxonomy follows MixJudge caption ontology:
+  11 dims / 6 axes. stereo+phase retired; masking is one dim (not
+  swamping/invading). Independent of MixAssist labeling DIMENSION_TO_AXIS
+  until labeling is remapped separately.
 
 Usage (from repo root):
   python src/term_extract.py extract --splits train --limit 5
@@ -41,7 +46,6 @@ if str(_SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(_SRC_ROOT))
 
 from labeling.labeling_common import (  # noqa: E402
-    DIMENSION_TO_AXIS,
     PROJECT_ROOT,
     SPLIT_FILES,
     STEM_ALIASES,
@@ -59,6 +63,22 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 DEFAULT_CLAP_MODEL = "laion/clap-htsat-unfused"
 
+# MixJudge caption ontology — axes kept only for hierarchical map (axis→dim).
+# Fine-tune SEED_WORDS_* below; dim names must stay aligned with LEXICON_BRIEF §1.
+DIMENSION_TO_AXIS = {
+    "too_quiet": "level",
+    "too_loud": "level",
+    "muddy": "body",
+    "thin": "body",
+    "harsh": "brightness",
+    "dull": "brightness",
+    "too_wet": "space",
+    "too_dry": "space",
+    "over_compressed": "dynamic",
+    "under_compressed": "dynamic",
+    "masking": "masking",
+}
+
 AXES = (
     "level",
     "body",
@@ -66,21 +86,18 @@ AXES = (
     "space",
     "dynamic",
     "masking",
-    "stereo",
-    "phase",
 )
 
-# Same 15 signed dims as labeling (order stable for scoring matrices).
 DIMENSIONS = tuple(DIMENSION_TO_AXIS.keys())
 
-# axis → its signed dims (usually 2; phase → 1)
+# axis → dims (pairs of 2; masking → 1)
 AXIS_TO_DIMS: dict[str, tuple[str, ...]] = {}
 for _dim, _axis in DIMENSION_TO_AXIS.items():
     AXIS_TO_DIMS.setdefault(_axis, [])
     AXIS_TO_DIMS[_axis].append(_dim)
 AXIS_TO_DIMS = {a: tuple(AXIS_TO_DIMS[a]) for a in AXES}
 
-# 8-axis seed anchors
+# 6-axis seed anchors
 SEED_WORDS_AXIS = {
     "level": [
         "loud", "quiet", "too loud", "too quiet",
@@ -102,37 +119,59 @@ SEED_WORDS_AXIS = {
         "punchy", "flat", "squashed", "pumping", "tight",
         "pinched", "over compressed", "no dynamics", "transient", "clicky",
     ],
+    # competition / obstruction only — avoid bare loudness words (vs level)
     "masking": [
         "masked", "overcrowded", "drowned", "gets lost", "buried"
         "bleeding", "getting in the way", "covered by", "swamping", "muffled",
-    ],
-    "stereo": [
-        "wide", "narrow", "too wide", "too narrow",
-        "panned", "mono", "centered", "to the side", "left and right",
-    ],
-    "phase": [
-        "phasing", "phasing issues", "phasey", "out of phase",
-        "phase cancellation", "not time aligned", "canceled", "polarity",
-    ],
+    ]
 }
 
-# 15-dimension seed anchors (aligned with labeling DIMENSION_TO_AXIS)
+# 11-dimension seed anchors (LEXICON_BRIEF §2/§4 distinguishability)
+# TODO(you): expand/trim per dim after reviewing map CSVs — especially
+# too_quiet vs masking, muddy vs dull, over vs under compressed.
 SEED_WORDS_DIM: dict[str, list[str]] = {
-    "too_quiet": ["too quiet", "quiet", "buried", "inaudible", "too soft", "can't hear"],
-    "too_loud": ["too loud", "loud", "overpowering", "way too loud", "front"],
-    "muddy": ["muddy", "muddiness", "mud", "boomy", "cloudy", "thick low end"],
-    "thin": ["thin", "skinny", "anemic", "lacks body", "no weight"],
-    "harsh": ["harsh", "harshness", "sibilant", "piercing", "too bright", "presence", "sparkle"],
-    "dull": ["dull", "dark", "lacks air", "lifeless top", "no sparkle"],
-    "too_wet": ["too wet", "washed out", "too much reverb", "big reverb"],
-    "too_dry": ["too dry", "dry", "no reverb", "boxy", "needs space"],
-    "over_compressed": ["over compressed", "squashed", "pumping", "no dynamics", "flat"],
-    "under_compressed": ["under compressed", "uncontrolled", "jumpy", "too dynamic", "needs compression"],
-    "swamping": ["swamping", "drowned", "covered by", "overcrowded", "masking the vocal"],
-    "invading": ["invading", "sticking out", "poking through", "cutting through too much"],
-    "too_wide": ["too wide", "wide", "overspread", "spread too much", "spacey"],
-    "too_narrow": ["too narrow", "narrow", "mono", "too centered"],
-    "phase": ["phasey", "hollow", "canceled", "phase cancellation", "polarity"],
+    "too_quiet": [
+        "too quiet", "quiet", "barely audible", "inaudible",
+        "too soft", "can't hear", "lost under the band",
+    ],
+    "too_loud": [
+        "too loud", "loud", "overpowering", "way too loud",
+        "blasting over the band", "far too dominant",
+    ],
+    "muddy": [
+        "muddy", "boomy", "boxy", "congested", "woolly", "thick in the low mids",
+    ],
+    "thin": [
+        "thin", "hollow", "weedy", "lacks body", "small and lacking body", "no weight",
+    ],
+    "harsh": [
+        "harsh", "piercing", "brittle", "edgy", "fatiguing", "sibilant",
+    ],
+    "dull": [
+        "dull", "dark", "veiled", "lacking air", "no shine", "lidded",
+    ],
+    "too_wet": [
+        "too wet", "washed out", "drowned in reverb", "swimming in ambience",
+        "too much reverb", "distant and diffuse",
+    ],
+    "too_dry": [
+        "too dry", "bone dry", "no reverb", "without any ambience",
+        "disconnected from the room", "pasted on top of the mix",
+    ],
+    "over_compressed": [
+        "over compressed", "squashed", "flattened", "lifeless",
+        "pumping", "no dynamics", "crushed flat",
+    ],
+    "under_compressed": [
+        "under compressed", "uneven", "jumping around in level",
+        "uncontrolled dynamics", "wildly inconsistent", "needs compression",
+    ],
+    # no "quiet" / "soft" / bare "buried" — those belong to too_quiet
+    "masking": [
+        "masked", "obscured", "swallowed by the rest of the mix",
+        "covered up by a competing instrument",
+        "lost in a frequency clash", "buried under competing frequencies",
+    ],
 }
 
 TEMPERATURE = 0.1
@@ -402,10 +441,10 @@ def _hierarchical_assign(
     method: str,
     min_sim: float,
 ) -> list[dict]:
-    """Step1: nearest of 8 axes. Step2: nearest of that axis's 2 dims (phase: 1)."""
+    """Step1: nearest of 6 axes. Step2: nearest dim within that axis (masking: 1)."""
     import numpy as np
 
-    axis_sims = emb @ axis_mat.T  # (N, 8)
+    axis_sims = emb @ axis_mat.T  # (N, n_axes)
     mapped = []
     for i, term in enumerate(terms):
         axis_scores = {ax: float(axis_sims[i, j]) for j, ax in enumerate(AXES)}
@@ -463,7 +502,7 @@ def map_centroid(
     def encode(texts: list[str]):
         return model.encode(texts, normalize_embeddings=True, show_progress_bar=False, batch_size=batch_size)
 
-    print("[centroid] hierarchical: 8 axes → then 2 dims within axis")
+    print("[centroid] hierarchical: 6 axes → then dims within axis (11 dims total)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[centroid] embedding {len(descs)} unique descs ...")
@@ -507,7 +546,7 @@ def map_clap(
     def encode(texts: list[str]):
         return _clap_encode_texts(model, processor, texts, device, batch_size)
 
-    print("[clap] hierarchical: 8 axes → then 2 dims within axis")
+    print("[clap] hierarchical: 6 axes → then dims within axis (11 dims total)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[clap] embedding {len(descs)} unique descs ...")
@@ -809,7 +848,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="map device (auto falls back to cpu if CUDA alloc fails)",
         )
 
-    add_map_args(sub.add_parser("map", help="Map descs: 8 axes, then 2 dims within axis"))
+    add_map_args(sub.add_parser("map", help="Map descs: 6 axes → 11 MixJudge dims"))
     px = sub.add_parser("export", help="Write axis/dim review CSV(s)")
     add_io(px)
     px.add_argument("--method", choices=METHODS, default="both")
