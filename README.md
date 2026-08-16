@@ -57,9 +57,8 @@ MixAssist CSV (train / validation / test)
 ├── .gitignore
 ├── Labeling_Flow_Chart.png
 ├── labeling_pipeline.md
-├── label_stats.md
-├── generation_note.md
-├── intern_chores.md
+├── LEXICON_BRIEF.md
+├── Lexicon_and_L2_Generation.md
 ├── scripts/
 │   ├── export_problem_pool.py
 │   ├── analyze_labels.py
@@ -104,9 +103,8 @@ MixAssist CSV (train / validation / test)
 | 文件 | 說明 |
 |------|------|
 | [`labeling_pipeline.md`](labeling_pipeline.md) | 標註管線設計：上下文、JSON schema、正規化、L2 pool 匯出 |
-| [`label_stats.md`](label_stats.md) | 全量標註後的 coverage 與 axis / dimension 統計 |
-| [`generation_note.md`](generation_note.md) | L2 生成的輸入輸出與 style prompt 構想 |
-| [`intern_chores.md`](intern_chores.md) | 背景目標、L1/L2/L3、早期 9-key 規劃與 Phase checklist |
+| [`LEXICON_BRIEF.md`](LEXICON_BRIEF.md) | MixJudge caption ontology：11 dims、slot grammar、QUALITY 用詞 |
+| [`Lexicon_and_L2_Generation.md`](Lexicon_and_L2_Generation.md) | 現行 lexicon 抽取 → Quality Lexicon → L2 生成流程 |
 
 ---
 

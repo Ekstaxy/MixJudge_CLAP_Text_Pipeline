@@ -24,6 +24,7 @@ from .lexicon_slots import (  # noqa: F401
     PROBLEM_DIMS,
     assemble_caption,
     build_l1_records,
+    resolve_quality_json,
 )
 from .term_extract_prompt import (  # noqa: F401
     SYSTEM_PROMPT as TERM_EXTRACT_SYSTEM_PROMPT,

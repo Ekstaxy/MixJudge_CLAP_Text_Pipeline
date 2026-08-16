@@ -3,11 +3,11 @@
 L2 style transfer — LEXICON_BRIEF L1 captions → Amateur/Expert dialogue.
 
 Pipeline:
-  1. Build L1 captions from LEXICON_BRIEF slots (or load --l1 JSONL)
+  1. Build L1 captions from quality_from_manual (or load --l1 JSONL)
   2. Style pool = outputs/labeled_turns_gguf_all_problems.csv
   3. For each L1 row, randomly sample same-dimension MixAssist turns
      (no competing-dim gate; empty pool still generates from the caption)
-  4. Generate retarget | strict | free (fixed low temperature)
+  4. Generate retarget | strict | free (low temp except free)
   5. Model returns JSON: amateur, expert, problem_state_text
 
 Usage (from repo root):
@@ -53,6 +53,7 @@ from prompts.l2_generation_prompt import (  # noqa: E402
 from prompts.lexicon_slots import (  # noqa: E402
     PROBLEM_DIMS,
     build_l1_records,
+    resolve_quality_json,
     write_l1_jsonl,
 )
 
@@ -65,8 +66,10 @@ TOP_K = 64
 MAX_TOKENS = 768
 N_CTX = 4096
 
-# Single fixed temperature so all modes follow prompt rules (not a third experiment axis).
+# Retarget/strict stay low so they follow copy/shape rules.
+# Free is higher so paraphrases actually vary (0.1 collapsed to "I feel like…").
 FIXED_TEMPERATURE = 0.1
+FREE_TEMPERATURE = 0.8
 
 OUTPUT_FIELDS = [
     "l1_segment_id",
@@ -498,17 +501,27 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "L2 from LEXICON_BRIEF L1 captions + MixAssist style pool "
-            "(modes × exemplar_content; fixed low temperature)"
+            "(modes × exemplar_content; free uses a higher temperature)"
         )
     )
     parser.add_argument(
         "--l1",
         type=Path,
         default=None,
-        help="optional L1 JSONL; default: build captions from LEXICON_BRIEF slots",
+        help="optional L1 JSONL; default: build captions from quality_from_manual",
     )
     parser.add_argument("--pool", type=Path, default=DEFAULT_POOL)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--quality-json",
+        type=Path,
+        default=None,
+        help=(
+            "quality_from_manual.json. Default: "
+            "outputs/quality_from_manual/quality_from_manual.json, "
+            "else outputs/quality_from_manual.json"
+        ),
+    )
     parser.add_argument(
         "--n-per-dim",
         type=int,
@@ -550,7 +563,13 @@ def main() -> None:
         "--temperature",
         type=float,
         default=FIXED_TEMPERATURE,
-        help=f"Shared temperature for all modes (default {FIXED_TEMPERATURE})",
+        help=f"Temperature for retarget/strict (default {FIXED_TEMPERATURE})",
+    )
+    parser.add_argument(
+        "--free-temperature",
+        type=float,
+        default=FREE_TEMPERATURE,
+        help=f"Temperature for free mode only (default {FREE_TEMPERATURE})",
     )
     parser.add_argument(
         "--n-exemplars",
@@ -605,17 +624,22 @@ def main() -> None:
         l1_rows = load_l1_records(args.l1)
         print(f"L1 records: {len(l1_rows)} from {args.l1}")
     else:
+        try:
+            quality_json = resolve_quality_json(args.quality_json)
+        except FileNotFoundError as e:
+            sys.exit(str(e))
         l1_rows = build_l1_records(
             args.n_per_dim,
             args.seed,
             dims=args.dims,
             id_prefix=args.id_prefix,
             index_offset=args.index_offset,
+            quality_json=quality_json,
         )
         audit = args.output_dir / f"l1_lexicon_captions_{args.id_prefix}.jsonl"
         write_l1_jsonl(audit, l1_rows)
         print(
-            f"L1 records: {len(l1_rows)} built from LEXICON_BRIEF "
+            f"L1 records: {len(l1_rows)} built from {quality_json} "
             f"(n_per_dim={args.n_per_dim}, prefix={args.id_prefix}) → {audit}"
         )
     if args.limit is not None:
@@ -625,7 +649,10 @@ def main() -> None:
     dims_by_turn = index_dims_by_turn(pool)
 
     print(f"Style pool: {len(pool)} rows from {args.pool} (no confidence filter)")
-    print(f"exemplar_content={args.exemplar_content}  temperature={args.temperature}")
+    print(
+        f"exemplar_content={args.exemplar_content}  "
+        f"temp retarget/strict={args.temperature}  free={args.free_temperature}"
+    )
     print("Pool coverage (random same-dim sampling; empty pool still generates):")
     l1_dims = {(r.get("dimension") or "").strip().lower() for r in l1_rows}
     for dim in sorted(l1_dims | set(by_dim)):
@@ -660,14 +687,15 @@ def main() -> None:
                 f"(was {n_ex}; retarget rewrites a single MixAssist turn)"
             )
             n_ex = 1
+        temp = args.free_temperature if mode == "free" else args.temperature
         print(
             f"\n=== mode={mode} exemplar_content={args.exemplar_content} "
-            f"temp={args.temperature} → {out_csv.name} ==="
+            f"temp={temp} → {out_csv.name} ==="
         )
         total_fail += run_mode(
             mode=mode,
             exemplar_content=args.exemplar_content,
-            temperature=args.temperature,
+            temperature=temp,
             l1_rows=l1_rows,
             by_dim=by_dim,
             dims_by_turn=dims_by_turn,

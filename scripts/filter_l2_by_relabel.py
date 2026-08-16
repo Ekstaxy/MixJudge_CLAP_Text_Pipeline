@@ -140,16 +140,33 @@ def main() -> None:
         "--modes",
         nargs="+",
         choices=list(MODES),
-        default=list(MODES),
+        default=None,
+        help="modes to filter (default: whichever l2_from_l1_{mode}_raw.csv exist)",
     )
     parser.add_argument("--min-keep", type=int, default=10)
     parser.add_argument("--mismatch-limit", type=int, default=15)
     args = parser.parse_args()
 
     output_dir = args.output_dir
+    modes = list(args.modes) if args.modes else list(MODES)
+    present = []
+    missing = []
+    for mode in modes:
+        l2_path = output_dir / f"l2_from_l1_{mode}_{CONTENT}.csv"
+        labeled_path = output_dir / f"labeled_l2_gguf_{mode}_{CONTENT}.csv"
+        if l2_path.is_file() and labeled_path.is_file():
+            present.append(mode)
+        else:
+            missing.append(mode)
+            print(f"[skip] {mode}: missing {l2_path.name if not l2_path.is_file() else labeled_path.name}")
+    if not present:
+        raise SystemExit(
+            f"找不到可過濾的 mode。需要 l2_from_l1_{{mode}}_raw.csv "
+            f"+ labeled_l2_gguf_{{mode}}_raw.csv under {output_dir}"
+        )
     summaries = [
         filter_mode(output_dir, mode, args.min_keep, args.mismatch_limit)
-        for mode in args.modes
+        for mode in present
     ]
 
     union_dims = sorted({d for s in summaries for d in s["shortfall_dims"]})

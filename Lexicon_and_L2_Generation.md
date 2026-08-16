@@ -1,16 +1,116 @@
 # Task
 
 ## Lexicon / Quality Extraction
-Final result is in the `quality_from_manual.csv` and `quality_from_manual.json`, both of them separate each dimension to degree compatability and standalone.
-The result is manually extracted from the `lexicon_top_centroid_manual.json` which is also manually extracted from the `lexicon_top_centroid_dim.json`.
-The `lexicon_top_centroid_dim.json` is extracted from the `lexcicon_review_centroid_dim.csv`, which is generated from `lexicon_raw_all` by doing (centroid, embedding, blah, blah, blah)
-The `lexicon_raw_all` is extracted from the turns of MixAssist by extracting all the subject + description of the subject, no matter which dimension or axis, or if it's a problem.
-The Quality Lexicon is going to be used as L1 text. And these L1 text is going to be used as a input to generate L2 text.
 
-(It needs a text flow chart of how the quality/lexicon is extracted.)
+The final result lives in `outputs/quality_from_manual/quality_from_manual.csv` and `quality_from_manual.json`. Both files split each dimension into **degree compatible** vs **standalone** wording (plus a scope slot where one exists). That's the actual wording menu we care about.
+
+How it gets there, starting from MixAssist turns:
+
+```text
+MixAssist turns (train / validation / test)
+        │
+        │  Google Gemma 4 dumps (target, desc) pairs
+        │  NO axis/dim names in this prompt — just "what sounds like what"
+        ▼
+lexicon_raw_all.json
+        │
+        │  map: centroid (sentence-transformers)
+        │  first the 7 axes, then split into dims inside that axis
+        ▼
+lexicon_review_centroid_dim.csv   (and the axis-level version)
+        │
+        │  extract_lexicon.py — top-N unique descs per dim
+        ▼
+lexicon_top_centroid_dim.json
+        │
+        │  human pass → pick / rewrite / throw out junk
+        ▼
+lexicon_top_centroid_manual.json
+        │
+        │  another human pass → degree_compatible vs standalone
+        ▼
+quality_from_manual.json / .csv
+```
+
+`lexicon_raw_all` is extracted from MixAssist by pulling every subject + description of that subject, regardless of which dimension or axis it belongs to, or even whether it's a real problem at all. Workflow talk ("open the EQ") and empty "sounds good" get dropped. The extraction prompt is deliberately kept blind to our taxonomy so it doesn't just parrot back `too_loud` / `muddy`.
+
+The next step is mapping. Each free-form MixAssist phrase gets assigned to one of the 12 classes (11 problems + `clean`) by nearest-seed similarity.
+
+Principle (`src/term_extract.py`):
+
+- Every axis and every dim has a hand-written **seed list** (`SEED_WORDS_AXIS` / `SEED_WORDS_DIM`). These are short prototype phrases, not the raw MixAssist dumps — e.g. level seeds are `loud` / `too quiet` / `can't hear`; masking seeds are competition words (`masked`, `covered by`, `swamping`) and deliberately skip bare loudness words so they don't collapse into `too_quiet`. Seeds got edited whenever the review CSV showed a "magnet" — a seed pulling in the wrong kind of desc (e.g. `lacks body` dragging "gives it some body" into `thin`).
+- A sentence-transformers model embeds those seeds. For each label, the **centroid** is the mean of its seed vectors, then L2-normalized — that's the class prototype in embedding space.
+- Assignment is hierarchical: embed the MixAssist `desc` → find the nearest of the **7 axis** centroids (cosine / dot product on unit vectors) → then find the nearest **dim centroid inside that axis only**. `masking` / `clean` each have one dim, so picking the axis is the same as picking the dim. Similarity below `min_sim` gets flagged low-confidence, not dropped.
+- After that, a small regex post-filter fixes obvious polarity / "wish" mistakes (`needs to come up` → `too_quiet`) and drops stereo/noise phrasing. Human overrides live in `corrected_*`; the machine's guess is `assigned_*`.
+
+That dump is `lexicon_review_centroid_dim.csv`. `extract_lexicon.py` then takes the human `corrected_*` value if it's filled in, otherwise falls back to `assigned_*`, dedupes exact desc strings, and keeps the top-N unique descs per dim.
+
+From there, I manually pulled a cleaner list into `lexicon_top_centroid_manual.json`, and from that into `quality_from_manual` — that's the actual Quality Lexicon.
+
+The Quality Lexicon feeds L1 captions. L1 captions then feed L2 generation.
+
+---
+
+## Labeling MixAssist (before generation)
+
+MixAssist turns get labeled with the **7 axes / 12 classes** (11 problems + `clean`). The model only outputs `problem_dimension`; axis is looked up in code.
+
+
+| axis       | dimensions                                        |
+| ---------- | ------------------------------------------------- |
+| level      | too_quiet, too_loud                               |
+| body       | muddy, thin                                       |
+| brightness | harsh, dull                                       |
+| space      | too_wet, too_dry                                  |
+| dynamic    | over_compressed, under_compressed                 |
+| masking    | masking (no opposite)                             |
+| clean      | clean (fault-free state, not vague "sounds good") |
+
+
+`none` = no supported problem. One turn can explode into multiple rows if there are two clear problems.
+
+The key rules baked into the prompt:
+
+- Be conservative. Workflow / preference talk / "add saturation for warmth" with no stated defect → not a problem.
+- CURRENT TURN is primary. HISTORY is only used for pronouns, unfinished thoughts, and confirming an ongoing fault is the same one. Don't re-report an old problem the current turn has already moved past.
+- `problem_stem` = the thing that sounds wrong / is getting covered up. `fix_stem` = what actually gets adjusted. These can differ (the snare's lost, but you pull the cymbal).
+- The subject of the complaint in MixAssist can be anything. For MixJudge captions later, the vocal is always the subject.
+- Polarity: "needs more reverb" is `too_dry`, never `too_wet`. Wanting more punch/snap is `under_compressed`, not over. Reverb send talk is SPACE, not LEVEL.
+- `too_quiet` vs `masking`: no named competing source → `too_quiet`. Don't use bare "quiet/soft" for masking.
+- `vocal_lead` is only true for the lead vocal, not backing vocals / doubles.
+
+The pool we actually sample from: `outputs/labeled_turns_gguf_all_problems.csv` (`has_problem` true, `dim` ≠ `none`, non-empty `problem_text`).
+
+---
 
 ## Generation
-The turns of the MixAssit is first labeled by 12 dimension with 6 axis:
-(list all of them)
-The label prompt is ... (with some crucial regulations), and every turn could be labeled with different dim or axis if possible.
 
+L1 is composed as:
+
+```text
+The [SUBJECT] [COPULA] [QUALITY] [SCOPE]? .
+```
+
+Always about the vocal. `SUBJECT` is randomly picked from `the lead vocal` / `the singer` / `the vocal` / `the voice`. `COPULA` is randomly `is` / `sounds`. `QUALITY` is randomly picked from the MixAssist quality lexicon (`quality_from_manual` — the degree-compatible / standalone wording we extracted per dim). `SCOPE` is attached when that dim has one.
+
+No `clean` in this L1 set. 11 dims × 20 captions × 3 modes.
+
+Generation (`src/generate_l2_style.py` + `src/prompts/l2_generation_prompt.py`) also gets a random same-dim MixAssist turn as a style exemplar (raw Amateur/Expert lines). If a dim has no pool rows, it still generates from the L1 caption alone.
+
+It then writes Amateur / Expert JSON under three rewrite policies:
+
+- **retarget** — near-copy of the MixAssist turn; only swap the instrument words onto the L1 vocal. Keep fillers, length, hedges. Don't invent a cute short dialogue from the L1 sentence if an exemplar exists.
+- **strict** — stay close to the exemplar's rhythm/tone; swap the party to the vocal; don't copy extra faults from the surrounding chatter.
+- **free** — paraphrase however; exemplars are tone hints only. The dim / QUALITY and "it's the vocal" still have to hold.
+
+Output schema is always:
+
+```json
+{
+  "amateur": "...",
+  "expert": "...",
+  "problem_state_text": "short span of the L1 dim"
+}
+```
+
+After that, we relabel the generated dialogue with the **same** MixAssist labeling prompt (the gold dim is not shown to the model). If the predicted labels don't contain the original `gold_dim`, the row gets thrown out. Target is at least 10 kept per dim per mode; if a dim comes up short, we top it up once.

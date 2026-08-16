@@ -47,6 +47,13 @@ DIMENSION_TO_AXIS = {
     "clean": "clean",
 }
 
+# Old MixAssist labels used a two-way masking split. Map them onto the
+# current single dim so an un-remapped pool still has masking exemplars.
+DIMENSION_ALIASES = {
+    "swamping": "masking",
+    "invading": "masking",
+}
+
 VALID_DIMENSIONS = set(DIMENSION_TO_AXIS) | {"none"}
 VALID_CONFIDENCE = {"low", "mid", "high"}
 
@@ -254,6 +261,7 @@ def call_llm(processor, model, system_prompt: str, user_message: str) -> str:
 
 def normalize_dimension(value) -> str:
     v = str(value or "none").strip().lower()
+    v = DIMENSION_ALIASES.get(v, v)
     return v if v in VALID_DIMENSIONS else "none"
 
 
