@@ -35,6 +35,7 @@ import argparse
 import csv
 import json
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -112,7 +113,7 @@ SEED_WORDS_AXIS = {
     ],
     # competition / obstruction only — avoid bare loudness words (vs level)
     "masking": [
-        "masked", "overcrowded", "drowned", "gets lost", "buried"
+        "masked", "overcrowded", "drowned", "gets lost", "buried",
         "bleeding", "getting in the way", "covered by", "swamping", "muffled",
     ],
     # fault-free / no degradation (wet stem untouched)
@@ -174,7 +175,7 @@ SEED_WORDS_DIM: dict[str, list[str]] = {
     ],
     # no "quiet" / "soft" / bare "buried" — those belong to too_quiet
     "masking": [
-        "masked", "overcrowded", "drowned", "gets lost", "buried"
+        "masked", "overcrowded", "drowned", "gets lost", "buried",
         "bleeding", "getting in the way", "covered by", "swamping", "muffled",
     ],
     # no fault; brief: "sits cleanly", "mix is balanced" (no slot grammar)
@@ -200,6 +201,211 @@ def resolve_methods(method: str) -> list[str]:
     return ["centroid", "clap"] if method == "both" else [method]
 
 
+# ====================== post-filter (after nearest-seed map) ======================
+# Lightweight rules: drop retired/noise phrasing; fix common polarity / wish mistakes.
+# Edits assigned_* only. Human overrides stay in corrected_*.
+
+_DROP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(pan|panned|panning)\b", re.I), "stereo"),
+    (re.compile(r"\b(left ear|right ear)\b", re.I), "stereo"),
+    (re.compile(r"\b(sounds?\s+)?mono\b", re.I), "stereo"),
+    (re.compile(r"\b(too wide|widen|wider)\b", re.I), "stereo"),
+    (re.compile(r"^wide$", re.I), "stereo"),
+    (re.compile(r"\bsound better\b", re.I), "noise"),
+    (re.compile(r"\bsoulful\b", re.I), "noise"),
+    (re.compile(r"^(weird|sounds weird|sounds funky|bit strange|sucks)$", re.I), "noise"),
+    (re.compile(r"^more$", re.I), "noise"),
+    (re.compile(r"^better$", re.I), "noise"),
+    (re.compile(r"^simple$", re.I), "noise"),
+    (re.compile(r"^characteristic$", re.I), "noise"),
+    (re.compile(r"^not loving$", re.I), "noise"),
+]
+
+# (pattern, new_dimension, note_tag) — first match wins
+_RELABEL_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(
+            r"\b(brighten(s| it up)?|add(ing)? some sparkle|shimmer a little bit more|"
+            r"more air|give(s| it)? some air|giving it the airiness|clearer tone)\b",
+            re.I,
+        ),
+        "dull",
+        "wish→dull",
+    ),
+    (
+        re.compile(
+            r"\b(could be a little quieter|a little bit quieter|"
+            r"needs? to come down|need to go .+ down|can come down|go down|"
+            r"turn(ing)? (it |them |that \w+ )?down|"
+            r"does not need nearly as much volume|should be lowered|"
+            r"could be turned down)\b",
+            re.I,
+        ),
+        "too_loud",
+        "wish→too_loud",
+    ),
+    (
+        re.compile(
+            r"\b(needs? to come up|need to come up|sing louder|pull the voice up|"
+            r"bring .+ up a little)\b",
+            re.I,
+        ),
+        "too_quiet",
+        "wish→too_quiet",
+    ),
+]
+
+
+def _append_note(existing: str, tag: str) -> str:
+    tag = f"post:{tag}"
+    if not existing:
+        return tag
+    if tag in existing:
+        return existing
+    return f"{existing}; {tag}"
+
+
+def decide_post_rule(desc: str, assigned_dimension: str) -> tuple[str, str | None, str | None]:
+    """Return (action, new_dim_or_None, note_tag).
+    action: 'keep' | 'drop' | 'relabel'
+    """
+    text = (desc or "").strip()
+    if not text:
+        return "drop", None, "empty"
+
+    for pat, tag in _DROP_PATTERNS:
+        if pat.search(text):
+            return "drop", None, tag
+
+    for pat, new_dim, tag in _RELABEL_PATTERNS:
+        if pat.search(text):
+            if new_dim != assigned_dimension:
+                return "relabel", new_dim, tag
+            return "keep", None, None
+
+    # bare loudness wish stuck on masking → too_quiet family already handled;
+    # if masking but text is pure "come up" etc., covered above.
+    return "keep", None, None
+
+
+def apply_post_rules(terms: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Filter/relabel mapped terms in place-style; returns (kept, stats)."""
+    stats = {"kept": 0, "dropped": 0, "relabeled": 0}
+    out: list[dict] = []
+    for t in terms:
+        desc = t.get("desc", "")
+        old_dim = t.get("assigned_dimension", "")
+        action, new_dim, tag = decide_post_rule(desc, old_dim)
+        if action == "drop":
+            stats["dropped"] += 1
+            continue
+        if action == "relabel" and new_dim:
+            t = dict(t)
+            t["assigned_dimension"] = new_dim
+            t["assigned_axis"] = DIMENSION_TO_AXIS.get(new_dim, t.get("assigned_axis", ""))
+            t["dimension_axis"] = t["assigned_axis"]
+            t["post_note"] = tag or ""
+            # keep dimension_scores but mark note for export
+            stats["relabeled"] += 1
+        else:
+            stats["kept"] += 1
+        out.append(t)
+    return out, stats
+
+
+def apply_post_rules_csv_rows(
+    rows: list[dict],
+    *,
+    label_key: str,
+) -> tuple[list[dict], list[dict]]:
+    """Apply rules to review CSV rows. Returns (new_rows, change_records)."""
+    new_rows: list[dict] = []
+    changes: list[dict] = []
+    for row in rows:
+        desc = row.get("desc", "")
+        if label_key == "assigned_dimension":
+            old = (row.get("assigned_dimension") or "").strip()
+            action, new_dim, tag = decide_post_rule(desc, old)
+            if action == "drop":
+                changes.append(
+                    {
+                        "action": "drop",
+                        "desc": desc,
+                        "from": old,
+                        "to": "",
+                        "note": tag or "",
+                    }
+                )
+                continue
+            row = dict(row)
+            if action == "relabel" and new_dim:
+                row["assigned_dimension"] = new_dim
+                row["dimension_axis"] = DIMENSION_TO_AXIS.get(new_dim, row.get("dimension_axis", ""))
+                row["notes"] = _append_note(row.get("notes") or "", tag or "relabel")
+                changes.append(
+                    {
+                        "action": "relabel",
+                        "desc": desc,
+                        "from": old,
+                        "to": new_dim,
+                        "note": tag or "",
+                    }
+                )
+            new_rows.append(row)
+        else:
+            # axis CSV: drop stereo/noise; if dim-side relabel known, sync axis
+            old_ax = (row.get("assigned_axis") or "").strip()
+            # Use dimension_axis hint if present; else treat via desc-only dim rules
+            # Infer by running dim decision against empty old dim only for drop;
+            # for relabel, map new dim → axis.
+            action, new_dim, tag = decide_post_rule(desc, "")
+            if action == "drop":
+                changes.append(
+                    {
+                        "action": "drop",
+                        "desc": desc,
+                        "from": old_ax,
+                        "to": "",
+                        "note": tag or "",
+                    }
+                )
+                continue
+            row = dict(row)
+            if action == "relabel" and new_dim:
+                new_ax = DIMENSION_TO_AXIS[new_dim]
+                if new_ax != old_ax:
+                    row["assigned_axis"] = new_ax
+                    row["dimension_axis"] = new_ax
+                    row["notes"] = _append_note(row.get("notes") or "", tag or "relabel")
+                    changes.append(
+                        {
+                            "action": "relabel",
+                            "desc": desc,
+                            "from": old_ax,
+                            "to": new_ax,
+                            "note": tag or "",
+                        }
+                    )
+            new_rows.append(row)
+    return new_rows, changes
+
+
+def _load_csv_corrections(path: Path, corrected_key: str) -> dict[str, dict[str, str]]:
+    """Load human corrected_* / notes keyed by term_key(target, desc)."""
+    if not path.exists():
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            k = term_key(row.get("target", ""), row.get("desc", ""))
+            corr = (row.get(corrected_key) or "").strip()
+            notes = (row.get("notes") or "").strip()
+            if corr or notes:
+                out[k] = {"corrected": corr, "notes": notes}
+    return out
+
+
+# ====================== paths ======================
 def raw_jsonl_path(output_dir: Path, split: str) -> Path:
     return output_dir / f"lexicon_raw_{split}.jsonl"
 
@@ -587,6 +793,12 @@ def cmd_map(args: argparse.Namespace) -> dict[str, list[dict]]:
             mapped = map_clap(terms, args.clap_model, args.min_sim, args.batch_size, device)
             model_name = args.clap_model
 
+        mapped, post_stats = apply_post_rules(mapped)
+        print(
+            f"[post] {method}: kept={post_stats['kept']} "
+            f"relabeled={post_stats['relabeled']} dropped={post_stats['dropped']}"
+        )
+
         path = mapped_path(output_dir, method)
         path.write_text(
             json.dumps(
@@ -644,61 +856,77 @@ def _example_turn(term: dict) -> str:
 
 
 def export_axis(mapped: list[dict], path: Path) -> None:
-    rows = [
-        {
-            "target": t.get("target", ""),
-            "desc": t.get("desc", ""),
-            "count": t.get("count", 0),
-            "assigned_axis": t.get("assigned_axis", ""),
-            "similarity": t.get("axis_similarity", ""),
-            "low_confidence": t.get("axis_low_confidence", False),
-            "dimension_axis": t.get("dimension_axis", ""),
-            "corrected_axis": "",
-            "notes": "",
-            "example_turn": _example_turn(t),
-            "scores_json": json.dumps(t.get("axis_scores") or {}, ensure_ascii=False),
-        }
-        for t in sorted(
-            mapped,
-            key=lambda x: (x.get("assigned_axis", ""), -float(x.get("axis_similarity") or 0), x.get("desc", "")),
+    prev = _load_csv_corrections(path, "corrected_axis")
+    rows = []
+    for t in sorted(
+        mapped,
+        key=lambda x: (x.get("assigned_axis", ""), -float(x.get("axis_similarity") or 0), x.get("desc", "")),
+    ):
+        k = term_key(t.get("target", ""), t.get("desc", ""))
+        human = prev.get(k, {})
+        note = human.get("notes") or ""
+        if t.get("post_note"):
+            note = _append_note(note, t["post_note"])
+        rows.append(
+            {
+                "target": t.get("target", ""),
+                "desc": t.get("desc", ""),
+                "count": t.get("count", 0),
+                "assigned_axis": t.get("assigned_axis", ""),
+                "similarity": t.get("axis_similarity", ""),
+                "low_confidence": t.get("axis_low_confidence", False),
+                "dimension_axis": t.get("dimension_axis", ""),
+                "corrected_axis": human.get("corrected", ""),
+                "notes": note,
+                "example_turn": _example_turn(t),
+                "scores_json": json.dumps(t.get("axis_scores") or {}, ensure_ascii=False),
+            }
         )
-    ]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REVIEW_FIELDS_AXIS)
         w.writeheader()
         w.writerows(rows)
-    print(f"[export] axis {len(rows)} rows → {path}")
+    n_corr = sum(1 for r in rows if r["corrected_axis"])
+    print(f"[export] axis {len(rows)} rows (merged corrected={n_corr}) → {path}")
 
 
 def export_dim(mapped: list[dict], path: Path) -> None:
-    rows = [
-        {
-            "target": t.get("target", ""),
-            "desc": t.get("desc", ""),
-            "count": t.get("count", 0),
-            "assigned_dimension": t.get("assigned_dimension", ""),
-            "similarity": t.get("dimension_similarity", ""),
-            "low_confidence": t.get("dimension_low_confidence", False),
-            "dimension_axis": t.get("dimension_axis", ""),
-            "corrected_dimension": "",
-            "notes": "",
-            "example_turn": _example_turn(t),
-            "scores_json": json.dumps(t.get("dimension_scores") or {}, ensure_ascii=False),
-        }
-        for t in sorted(
-            mapped,
-            key=lambda x: (
-                x.get("assigned_dimension", ""),
-                -float(x.get("dimension_similarity") or 0),
-                x.get("desc", ""),
-            ),
+    prev = _load_csv_corrections(path, "corrected_dimension")
+    rows = []
+    for t in sorted(
+        mapped,
+        key=lambda x: (
+            x.get("assigned_dimension", ""),
+            -float(x.get("dimension_similarity") or 0),
+            x.get("desc", ""),
+        ),
+    ):
+        k = term_key(t.get("target", ""), t.get("desc", ""))
+        human = prev.get(k, {})
+        note = human.get("notes") or ""
+        if t.get("post_note"):
+            note = _append_note(note, t["post_note"])
+        rows.append(
+            {
+                "target": t.get("target", ""),
+                "desc": t.get("desc", ""),
+                "count": t.get("count", 0),
+                "assigned_dimension": t.get("assigned_dimension", ""),
+                "similarity": t.get("dimension_similarity", ""),
+                "low_confidence": t.get("dimension_low_confidence", False),
+                "dimension_axis": t.get("dimension_axis", ""),
+                "corrected_dimension": human.get("corrected", ""),
+                "notes": note,
+                "example_turn": _example_turn(t),
+                "scores_json": json.dumps(t.get("dimension_scores") or {}, ensure_ascii=False),
+            }
         )
-    ]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REVIEW_FIELDS_DIM)
         w.writeheader()
         w.writerows(rows)
-    print(f"[export] dim {len(rows)} rows → {path}")
+    n_corr = sum(1 for r in rows if r["corrected_dimension"])
+    print(f"[export] dim {len(rows)} rows (merged corrected={n_corr}) → {path}")
 
 
 def export_compare(
@@ -714,6 +942,8 @@ def export_compare(
     by_p = {term_key(t["target"], t["desc"]): t for t in clap_terms}
     label_c = f"centroid_{level}"
     label_p = f"clap_{level}"
+    corr_key = f"corrected_{level}"
+    prev = _load_csv_corrections(path, corr_key)
     fields = [
         "target",
         "desc",
@@ -723,7 +953,7 @@ def export_compare(
         label_p,
         "clap_sim",
         "agree",
-        f"corrected_{level}",
+        corr_key,
         "notes",
         "example_turn",
     ]
@@ -737,6 +967,7 @@ def export_compare(
         agree = bool(c_lab and p_lab and c_lab == p_lab)
         if agree:
             agree_n += 1
+        human = prev.get(k, {})
         rows.append(
             {
                 "target": base.get("target", ""),
@@ -747,8 +978,8 @@ def export_compare(
                 label_p: p_lab,
                 "clap_sim": (p or {}).get(sim_key, ""),
                 "agree": agree,
-                f"corrected_{level}": "",
-                "notes": "",
+                corr_key: human.get("corrected", ""),
+                "notes": human.get("notes", ""),
                 "example_turn": _example_turn(base),
             }
         )
@@ -761,6 +992,57 @@ def export_compare(
         f"[export] compare_{level} {len(rows)} rows, agree={agree_n}/{len(rows)} "
         f"({100.0 * agree_n / max(len(rows), 1):.1f}%) → {path}"
     )
+
+
+def _write_postfilter_diff(path: Path, changes: list[dict], level: str) -> None:
+    lines = [f"# postfilter {level} changes: {len(changes)}", ""]
+    by_act: dict[str, list[dict]] = {}
+    for ch in changes:
+        by_act.setdefault(ch["action"], []).append(ch)
+    for act in ("drop", "relabel"):
+        items = by_act.get(act, [])
+        lines.append(f"## {act} ({len(items)})")
+        for ch in items:
+            if act == "drop":
+                lines.append(f"- [{ch['from']}] {ch['desc']!r}  ({ch['note']})")
+            else:
+                lines.append(
+                    f"- {ch['from']} → {ch['to']}: {ch['desc']!r}  ({ch['note']})"
+                )
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[post] wrote diff → {path}")
+
+
+def cmd_postfilter(args: argparse.Namespace) -> None:
+    """Apply post-rules to existing review CSVs (no remap). Preserves corrected_*."""
+    output_dir: Path = args.output_dir
+    for method in resolve_methods(args.method):
+        for level, fields, label_key in (
+            ("dim", REVIEW_FIELDS_DIM, "assigned_dimension"),
+            ("axis", REVIEW_FIELDS_AXIS, "assigned_axis"),
+        ):
+            path = review_csv_path(output_dir, method, level)
+            if not path.exists():
+                print(f"[post] skip missing {path}")
+                continue
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+            bak = path.with_suffix(".before_postfilter.csv")
+            if not bak.exists():
+                bak.write_text(path.read_text(encoding="utf-8-sig"), encoding="utf-8-sig")
+                print(f"[post] backup → {bak}")
+            new_rows, changes = apply_post_rules_csv_rows(rows, label_key=label_key)
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(new_rows)
+            diff_path = output_dir / f"lexicon_postfilter_diff_{method}_{level}.md"
+            _write_postfilter_diff(diff_path, changes, f"{method}/{level}")
+            print(
+                f"[post] {method}/{level}: {len(rows)} → {len(new_rows)} "
+                f"(changes={len(changes)}) → {path}"
+            )
 
 
 def _load_mapped(output_dir: Path, method: str, cache: dict[str, list[dict]] | None) -> list[dict]:
@@ -864,14 +1146,25 @@ def build_parser() -> argparse.ArgumentParser:
     add_io(px)
     px.add_argument("--method", choices=METHODS, default="both")
     add_map_args(sub.add_parser("map-and-export", help="map then export"))
+
+    pp = sub.add_parser(
+        "postfilter",
+        help="Apply drop/relabel rules to existing review CSVs (no remap)",
+    )
+    add_io(pp)
+    pp.add_argument("--method", choices=METHODS, default="centroid")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    {"extract": cmd_extract, "map": cmd_map, "export": cmd_export, "map-and-export": cmd_map_and_export}[
-        args.command
-    ](args)
+    {
+        "extract": cmd_extract,
+        "map": cmd_map,
+        "export": cmd_export,
+        "map-and-export": cmd_map_and_export,
+        "postfilter": cmd_postfilter,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,8 @@
 
 JSON: only desc lists, padded with "" to top_n.
 
+Label priority: corrected_* (human) if non-empty, else assigned_*.
+
 Taxonomy: MixJudge 7 axes / 12 classes (11 problem + clean; same as term_extract).
 
 Usage:
@@ -59,13 +61,30 @@ DIMENSIONS = (
 )
 
 
-def top_descs(csv_path: Path, top_n: int, label_col: str, labels: tuple[str, ...]) -> dict[str, list[str]]:
+def effective_label(row: dict, assigned_col: str, corrected_col: str) -> str:
+    """Human corrected_* wins when non-empty; else machine assigned_*."""
+    corr = (row.get(corrected_col) or "").strip()
+    if corr:
+        return corr
+    return (row.get(assigned_col) or "").strip()
+
+
+def top_descs(
+    csv_path: Path,
+    top_n: int,
+    assigned_col: str,
+    corrected_col: str,
+    labels: tuple[str, ...],
+) -> tuple[dict[str, list[str]], int]:
     by_lab: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    n_corr = 0
     with open(csv_path, encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
-            lab = (row.get(label_col) or "").strip()
+            lab = effective_label(row, assigned_col, corrected_col)
             if lab not in labels:
                 continue
+            if (row.get(corrected_col) or "").strip():
+                n_corr += 1
             desc = row.get("desc") or ""
             if not desc:
                 continue
@@ -86,7 +105,7 @@ def top_descs(csv_path: Path, top_n: int, label_col: str, labels: tuple[str, ...
         while len(picked) < top_n:
             picked.append("")
         out[lab] = picked
-    return out
+    return out, n_corr
 
 
 def write_one(
@@ -94,14 +113,15 @@ def write_one(
     out_path: Path,
     top_n: int,
     label: str,
-    label_col: str,
+    assigned_col: str,
+    corrected_col: str,
     labels: tuple[str, ...],
 ) -> None:
-    data = top_descs(csv_path, top_n, label_col, labels)
+    data, n_corr = top_descs(csv_path, top_n, assigned_col, corrected_col, labels)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     filled = {a: sum(1 for d in data[a] if d) for a in labels}
-    print(f"[{label}] filled={filled}")
+    print(f"[{label}] filled={filled} (rows_with_corrected={n_corr})")
     print(f"  → {out_path}")
 
 
@@ -116,12 +136,28 @@ def main() -> None:
     args = p.parse_args()
 
     if args.level == "axis":
-        label_col, labels = "assigned_axis", AXES
+        assigned_col, corrected_col, labels = "assigned_axis", "corrected_axis", AXES
     else:
-        label_col, labels = "assigned_dimension", DIMENSIONS
+        assigned_col, corrected_col, labels = "assigned_dimension", "corrected_dimension", DIMENSIONS
 
-    write_one(args.centroid, args.centroid_out, args.top_n, f"centroid-{args.level}", label_col, labels)
-    write_one(args.clap, args.clap_out, args.top_n, f"clap-{args.level}", label_col, labels)
+    write_one(
+        args.centroid,
+        args.centroid_out,
+        args.top_n,
+        f"centroid-{args.level}",
+        assigned_col,
+        corrected_col,
+        labels,
+    )
+    write_one(
+        args.clap,
+        args.clap_out,
+        args.top_n,
+        f"clap-{args.level}",
+        assigned_col,
+        corrected_col,
+        labels,
+    )
 
 
 if __name__ == "__main__":

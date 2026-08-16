@@ -14,10 +14,16 @@ from .l2_generation_prompt import (  # noqa: F401
     SYSTEM_PROMPT_RETARGET,
     SYSTEM_PROMPT_STRICT,
     VALID_EXEMPLAR_CONTENTS,
+    VALID_L1_DIMS,
     VALID_MODES,
     build_user_prompt,
     stem_to_subject,
     system_prompt_for_mode,
+)
+from .lexicon_slots import (  # noqa: F401
+    PROBLEM_DIMS,
+    assemble_caption,
+    build_l1_records,
 )
 from .term_extract_prompt import (  # noqa: F401
     SYSTEM_PROMPT as TERM_EXTRACT_SYSTEM_PROMPT,
