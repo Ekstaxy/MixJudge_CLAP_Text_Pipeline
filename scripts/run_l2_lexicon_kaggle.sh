@@ -6,8 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-OUT="${OUTPUT_DIR:-new_outputs}"
-POOL="${POOL:-new_outputs/labeled_turns_gguf_all_problems.csv}"
+OUT="${OUTPUT_DIR:-outputs}"
+POOL="${POOL:-outputs/labeled_turns_gguf_all_problems.csv}"
 N_BATCH="${N_BATCH:-256}"
 N_PER_DIM="${N_PER_DIM:-20}"
 MIN_KEEP="${MIN_KEEP:-10}"

@@ -12,4 +12,5 @@ The Quality Lexicon is going to be used as L1 text. And these L1 text is going t
 ## Generation
 The turns of the MixAssit is first labeled by 12 dimension with 6 axis:
 (list all of them)
-The label prompt is ... (with some crucial regulations), the 
+The label prompt is ... (with some crucial regulations), and every turn could be labeled with different dim or axis if possible.
+

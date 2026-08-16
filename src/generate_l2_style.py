@@ -4,7 +4,7 @@ L2 style transfer — LEXICON_BRIEF L1 captions → Amateur/Expert dialogue.
 
 Pipeline:
   1. Build L1 captions from LEXICON_BRIEF slots (or load --l1 JSONL)
-  2. Style pool = new_outputs/labeled_turns_gguf_all_problems.csv
+  2. Style pool = outputs/labeled_turns_gguf_all_problems.csv
   3. For each L1 row, randomly sample same-dimension MixAssist turns
      (no competing-dim gate; empty pool still generates from the caption)
   4. Generate retarget | strict | free (fixed low temperature)
@@ -57,8 +57,8 @@ from prompts.lexicon_slots import (  # noqa: E402
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_POOL = PROJECT_ROOT / "new_outputs" / "labeled_turns_gguf_all_problems.csv"
-DEFAULT_OUT_DIR = PROJECT_ROOT / "new_outputs"
+DEFAULT_POOL = PROJECT_ROOT / "outputs" / "labeled_turns_gguf_all_problems.csv"
+DEFAULT_OUT_DIR = PROJECT_ROOT / "outputs"
 
 TOP_P = 0.95
 TOP_K = 64

@@ -7,7 +7,7 @@ Writes:
   {output-dir}/l2_shortfall.json
 
 Usage (from repo root):
-  python scripts/filter_l2_by_relabel.py --output-dir new_outputs --min-keep 10
+  python scripts/filter_l2_by_relabel.py --output-dir outputs --min-keep 10
 """
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "new_outputs",
+        default=PROJECT_ROOT / "outputs",
     )
     parser.add_argument(
         "--modes",
