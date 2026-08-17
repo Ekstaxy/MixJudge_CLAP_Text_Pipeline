@@ -25,7 +25,7 @@ import json
 
 from .lexicon_slots import PROBLEM_DIMS
 
-# MixJudge problem classes used as L1 generation dims (no clean).
+# MixJudge classes used as L1 generation dims (11 problems + clean).
 VALID_L1_DIMS = PROBLEM_DIMS
 
 OUTPUT_SCHEMA = """\
@@ -48,8 +48,10 @@ _L1_RULES = """\
 L1 caption grammar (must preserve meaning):
   The [SUBJECT] [COPULA] [QUALITY] [SCOPE]? .
 SUBJECT is always the vocal (the lead vocal / the singer / the vocal / the voice).
-The dialogue must clearly support L1.dim about that vocal — not a different fault
+The dialogue must clearly support L1.dim about that vocal — not a different class
 and not a different instrument.
+If L1.dim is clean: this is a fault-free / balanced state. Say the vocal sits
+cleanly or the mix is balanced. Do NOT invent a mixing problem or a corrective fix.
 """
 
 SYSTEM_PROMPT_RETARGET = f"""\
@@ -230,11 +232,18 @@ def build_user_prompt(
     if l1_text:
         parts.append(f'L1 caption (must preserve meaning): "{l1_text}"')
 
+    dim = (input_obj.get("dim") or "").strip().lower()
     parts.append(
         f"Must express dim={input_obj.get('dim', '')!r} on "
         f"source={input_obj.get('source', '')!r} "
         f"(vocal subject in the L1 caption)."
     )
+    if dim == "clean":
+        parts.append(
+            "CLEAN: L1.dim is fault-free / balanced — not a mixing problem. "
+            "Amateur and expert should agree the vocal sits cleanly. "
+            "Do not invent a fault or a corrective fix."
+        )
 
     if include_raw and mode != "retarget":
         parts.append(
@@ -263,7 +272,25 @@ def build_user_prompt(
             )
 
     parts.append("\n# Example JSON shape (content illustrative only)")
-    if mode == "retarget":
+    if dim == "clean":
+        parts.append('L1 caption: "The singer sounds balanced."')
+        parts.append(
+            'Input: {"axis": "clean", "dim": "clean", "source": "vocal"}'
+        )
+        parts.append("Output:")
+        parts.append(
+            json.dumps(
+                {
+                    "amateur": "Yeah, the vocal sits really cleanly in this mix.",
+                    "expert": (
+                        "Agreed — it's balanced. I wouldn't chase a problem here."
+                    ),
+                    "problem_state_text": "the vocal sits really cleanly",
+                },
+                ensure_ascii=False,
+            )
+        )
+    elif mode == "retarget":
         if include_raw:
             parts.append(
                 'MixAssist problem_text: "too cymbal-y / harsh up top"'

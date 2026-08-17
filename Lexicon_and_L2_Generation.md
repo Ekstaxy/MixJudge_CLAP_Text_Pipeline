@@ -47,6 +47,26 @@ That dump is `lexicon_review_centroid_dim.csv`. `extract_lexicon.py` then takes 
 
 From there, I manually pulled a cleaner list into `lexicon_top_centroid_manual.json`, and from that into `quality_from_manual` — that's the actual Quality Lexicon.
 
+**quality_from_manual.json — wording counts per dimension**
+
+
+| dimension        | degree_compatible | standalone | total |
+| ---------------- | ----------------- | ---------- | ----- |
+| too_quiet        | 12                | 11         | 23    |
+| too_loud         | 20                | 25         | 45    |
+| muddy            | 10                | 5          | 15    |
+| thin             | 4                 | 5          | 9     |
+| harsh            | 16                | 5          | 21    |
+| dull             | 8                 | 9          | 17    |
+| too_wet          | 11                | 11         | 22    |
+| too_dry          | 5                 | 3          | 8     |
+| over_compressed  | 10                | 10         | 20    |
+| under_compressed | 15                | 11         | 26    |
+| masking          | 3                 | 27         | 30    |
+| clean            | 12                | 1          | 13    |
+| Total            | 126               | 123        | 249   |
+
+
 The Quality Lexicon feeds L1 captions. L1 captions then feed L2 generation.
 
 ---
@@ -81,6 +101,26 @@ The key rules baked into the prompt:
 
 The pool we actually sample from: `outputs/labeled_turns_gguf_all_problems.csv` (`has_problem` true, `dim` ≠ `none`, non-empty `problem_text`).
 
+**labeled_turns_gguf_all_problems.csv — counts per dimension**
+
+
+| dimension        | count |
+| ---------------- | ----- |
+| too_quiet        | 44    |
+| too_loud         | 54    |
+| muddy            | 41    |
+| thin             | 7     |
+| harsh            | 5     |
+| dull             | 7     |
+| too_wet          | 13    |
+| too_dry          | 26    |
+| over_compressed  | 4     |
+| under_compressed | 33    |
+| masking          | 34    |
+| clean            | 15    |
+| Total            | 283   |
+
+
 ---
 
 ## Generation
@@ -99,9 +139,12 @@ Generation (`src/generate_l2_style.py` + `src/prompts/l2_generation_prompt.py`) 
 
 It then writes Amateur / Expert JSON under three rewrite policies:
 
-- **retarget** — near-copy of the MixAssist turn; only swap the instrument words onto the L1 vocal. Keep fillers, length, hedges. Don't invent a cute short dialogue from the L1 sentence if an exemplar exists.
-- **strict** — stay close to the exemplar's rhythm/tone; swap the party to the vocal; don't copy extra faults from the surrounding chatter.
-- **free** — paraphrase however; exemplars are tone hints only. The dim / QUALITY and "it's the vocal" still have to hold.
+- **retarget** — near-copy of the MixAssist turn; only swap the instrument words onto the L1 vocal. Keep fillers, length, hedges. Don't invent a cute short dialogue from the L1 sentence if an exemplar exists.  
+The temperature of the inferencing is set to 0.1.
+- **strict** — stay close to the exemplar's rhythm/tone; swap the party to the vocal; don't copy extra faults from the surrounding chatter.  
+The temperature of the inferencing is set to 0.1.
+- **free** — paraphrase however; exemplars are tone hints only. The dim / QUALITY and "it's the vocal" still have to hold.  
+The temperature of the inferencing is set to 0.5.
 
 Output schema is always:
 
@@ -113,4 +156,4 @@ Output schema is always:
 }
 ```
 
-After that, we relabel the generated dialogue with the **same** MixAssist labeling prompt (the gold dim is not shown to the model). If the predicted labels don't contain the original `gold_dim`, the row gets thrown out. Target is at least 10 kept per dim per mode; if a dim comes up short, we top it up once.
+After that, we relabel the generated dialogue with the **same** MixAssist labeling prompt. If the predicted labels don't contain the original dimension, the row gets thrown out. Target is at least 10 kept per dim per mode; if a dim comes up short, we top it up once.

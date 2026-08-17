@@ -74,7 +74,13 @@ def filter_mode(
     by_dim: Counter[str] = Counter(
         str(r.get("gold_dim") or "").strip().lower() for r in kept_rows
     )
-    dim_counts = {d: int(by_dim.get(d, 0)) for d in PROBLEM_DIMS}
+    gold_in_file = {
+        str(r.get("gold_dim") or "").strip().lower()
+        for r in l2_rows
+        if str(r.get("gold_dim") or "").strip().lower()
+    }
+    ordered = [d for d in PROBLEM_DIMS if d in gold_in_file]
+    dim_counts = {d: int(by_dim.get(d, 0)) for d in ordered}
     shortfall = {
         d: max(0, min_keep - n) for d, n in dim_counts.items() if n < min_keep
     }
@@ -104,7 +110,14 @@ def format_report(summaries: list[dict], min_keep: int) -> str:
     header = "| dim | " + " | ".join(s["mode"] for s in summaries) + " |"
     sep = "|---|" + "|".join("---:" for _ in summaries) + "|"
     lines += ["## Kept counts", "", header, sep]
-    for dim in PROBLEM_DIMS:
+    dims = []
+    seen: set[str] = set()
+    for s in summaries:
+        for d in s["dim_counts"]:
+            if d not in seen:
+                seen.add(d)
+                dims.append(d)
+    for dim in dims:
         cells = []
         for s in summaries:
             n = s["dim_counts"].get(dim, 0)

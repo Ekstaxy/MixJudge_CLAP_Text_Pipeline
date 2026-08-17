@@ -14,6 +14,7 @@ Usage (from repo root):
   python src/generate_l2_style.py --modes retarget strict free \\
     --exemplar-content raw --n-per-dim 20 --overwrite
   python src/generate_l2_style.py --modes retarget --dry-run --limit 1
+  python src/generate_l2_style.py --dims clean --modes free --n-per-dim 20
 
 Output:
   {output-dir}/l2_from_l1_{mode}_{exemplar_content}.csv (+ _raw.jsonl)
@@ -307,6 +308,44 @@ def call_generate(llm, system_prompt: str, user_message: str, temperature: float
     return (resp["choices"][0]["message"]["content"] or "").strip()
 
 
+def drop_segment_ids(csv_path: Path, jsonl_path: Path, segment_ids: set[str]) -> int:
+    """Remove existing rows for this batch so --dims clean does not wipe other dims."""
+    dropped = 0
+    if csv_path.exists() and segment_ids:
+        with csv_path.open(encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        kept = [
+            r
+            for r in rows
+            if (r.get("l1_segment_id") or "").strip() not in segment_ids
+        ]
+        dropped = len(rows) - len(kept)
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
+            w.writeheader()
+            for r in kept:
+                w.writerow({k: r.get(k, "") for k in OUTPUT_FIELDS})
+    if jsonl_path.exists() and segment_ids:
+        kept_raw = []
+        with jsonl_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    kept_raw.append(line)
+                    continue
+                if (obj.get("l1_segment_id") or "").strip() in segment_ids:
+                    continue
+                kept_raw.append(line)
+        with jsonl_path.open("w", encoding="utf-8") as f:
+            for line in kept_raw:
+                f.write(line + "\n")
+    return dropped
+
+
 def purge_error_rows(path: Path) -> int:
     if not path.exists():
         return 0
@@ -371,11 +410,15 @@ def run_mode(
 ) -> int:
     tag_prefix = variant_tag(mode, exemplar_content)
     raw_jsonl = out_csv.with_name(out_csv.stem + "_raw.jsonl")
+    batch_ids = {(rec.get("segment_id") or "").strip() for rec in l1_rows}
+    batch_ids.discard("")
     if overwrite:
-        for p in (out_csv, raw_jsonl):
-            if p.exists():
-                p.unlink()
-                print(f"[{tag_prefix}] --overwrite: deleted {p.name}")
+        dropped = drop_segment_ids(out_csv, raw_jsonl, batch_ids)
+        if dropped:
+            print(
+                f"[{tag_prefix}] --overwrite: dropped {dropped} existing row(s) "
+                f"for this batch (other dims kept)"
+            )
     else:
         removed = purge_error_rows(out_csv)
         if removed:
@@ -533,7 +576,7 @@ def main() -> None:
         nargs="+",
         choices=list(PROBLEM_DIMS),
         default=None,
-        help="subset of dims to generate (default: all 11 problem dims)",
+        help="subset of dims (default: all 12, including clean). Example: --dims clean",
     )
     parser.add_argument(
         "--id-prefix",

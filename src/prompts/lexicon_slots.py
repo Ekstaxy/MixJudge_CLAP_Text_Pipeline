@@ -25,7 +25,7 @@ QUALITY_JSON_CANDIDATES = (
     PROJECT_ROOT / "new_outputs" / "quality_from_manual.json",
 )
 
-# 11 problem dims (no clean) — generation L1 set.
+# 12 classes = 11 problem dims + clean. `--dims clean` generates only clean.
 PROBLEM_DIMS = (
     "too_loud",
     "too_quiet",
@@ -38,6 +38,7 @@ PROBLEM_DIMS = (
     "over_compressed",
     "under_compressed",
     "masking",
+    "clean",
 )
 
 DIM_TO_AXIS = {
@@ -52,6 +53,7 @@ DIM_TO_AXIS = {
     "over_compressed": "dynamic",
     "under_compressed": "dynamic",
     "masking": "masking",
+    "clean": "clean",
 }
 
 SUBJECTS = (
@@ -76,6 +78,7 @@ QUALITY_BY_DIM = {
     "over_compressed": "squashed",
     "under_compressed": "dynamically uncontrolled",
     "masking": "masked",
+    "clean": "clean",
 }
 
 _QUALITY_CACHE: dict[str, dict] = {}
@@ -181,6 +184,8 @@ def _standalone_needs_copula(quality: str) -> bool:
         "cannot ",
         "doesn't ",
         "does not ",
+        "didn't ",
+        "did not ",
         "needs ",
         "need to ",
         "could ",
@@ -197,9 +202,19 @@ def _standalone_needs_copula(quality: str) -> bool:
     return not q.startswith(prefixes)
 
 
-def format_caption(subject: str, copula: str, quality: str, scope: str, kind: str) -> str:
+def format_caption(
+    subject: str,
+    copula: str,
+    quality: str,
+    scope: str,
+    kind: str,
+    dim: str = "",
+) -> str:
     q = fit_after_copula(quality)
-    if kind == "standalone" and not _standalone_needs_copula(q):
+    dim = (dim or "").strip().lower()
+    if dim == "clean" and kind == "standalone":
+        head = f"{capitalize_subject(subject)} — {q}"
+    elif kind == "standalone" and not _standalone_needs_copula(q):
         head = f"{capitalize_subject(subject)} {q}"
     else:
         head = f"{capitalize_subject(subject)} {copula} {q}"
@@ -225,7 +240,7 @@ def assemble_caption(
     subj = subject if subject is not None else rng.choice(SUBJECTS)
     cop = copula if copula is not None else rng.choice(COPULAS)
     quality, kind, scope = sample_quality(dim, rng, lexicon=lexicon)
-    return format_caption(subj, cop, quality, scope, kind)
+    return format_caption(subj, cop, quality, scope, kind, dim=dim)
 
 
 def l1_record(
@@ -241,7 +256,7 @@ def l1_record(
     subj = rng.choice(SUBJECTS)
     cop = rng.choice(COPULAS)
     quality, kind, scope = sample_quality(dim, rng, lexicon=lexicon)
-    caption = format_caption(subj, cop, quality, scope, kind)
+    caption = format_caption(subj, cop, quality, scope, kind, dim=dim)
     axis = DIM_TO_AXIS[dim]
     return {
         "segment_id": f"{id_prefix}_{dim}_{index:02d}",
