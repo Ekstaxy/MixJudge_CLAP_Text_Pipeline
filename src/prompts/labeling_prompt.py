@@ -76,10 +76,11 @@ EVIDENCE RULES
    has_problem=false, has_fix=true, and vice versa. If neither exists,
    return exactly one empty label (has_problem=false, has_fix=false,
    problem_dimension "none").
-4. Vague approval ("that sounds great", "this is fine", "perfect") with no
-   concrete sonic claim → none (neither problem nor clean). Explicit
-   clean/balanced/fault-free sonic state → clean (has_problem=true).
-   Always keep clean as a labelable class. Do not drop it.
+4. Praise / approval counts as clean: "that sounds great", "this is fine",
+   "perfect", "sounds good", "I like it", "yeah that's better" with no
+   stated defect → clean (has_problem=true). Explicit balanced / sits
+   cleanly / fault-free wording → clean as well. Always keep clean as a
+   labelable class. Do not drop praise into none.
 CURRENT TURN vs HISTORY (dimension gate — mandatory)
 - Decide problem_dimension from CURRENT TURN wording ALONE.
 - If this turn, ignoring HISTORY, is compatible with more than one of the
@@ -115,21 +116,11 @@ AFFECTED STEM vs ACTION TARGET (critical)
   (and usually as fix_stem if that is what gets adjusted).
 - HISTORY may resolve which stem "it/that" refers to. It may NOT invent
   a missing masking/too_quiet/muddy/... claim that CURRENT TURN never made.
-FIGURE vs BAND (vocal_lead)
-- MixAssist often talks about a foreground source (often lead vocal) versus
-  the backing bed / band, but this is a heuristic, not a hard schema rule.
-- vocal_lead: true ONLY if THIS label involves the LEAD / main vocal
-  (problem or fix about the lead vocal's level, tone, space, etc.).
-- vocal_lead: false for backing vocals, doubles, harmonies, ad-libs, and
-  any non-lead vocal layer — even if problem_stem is still "vocal".
-- Use HISTORY to tell lead vs backing when CURRENT is vague ("it", "that",
-  "wanted it more in the background"). If HISTORY established backing
-  vocals and CURRENT continues that thread, keep vocal_lead=false.
-- vocal_lead is a separate boolean only. Do NOT use it to override the
-  chosen axis or problem_dimension.
-- Do not hard-code dimensions to vocal-only or band-only. A dimension
-  should be chosen from the wording of the complaint, not from whether
-  the source is vocal or accompaniment.
+vocal_lead
+- true only if THIS label is about the lead / main vocal.
+- false for backing vocals, doubles, harmonies, and any non-lead source
+  (even if problem_stem is "vocal").
+- Do not use vocal_lead to choose problem_dimension.
 AXES AND DIMENSIONS (CRITICAL — use EXACT strings)
 There are exactly 7 axes and 12 classes (11 problem + clean). You output
 problem_dimension ONLY; code maps to problem_axis. NEVER output an axis
@@ -141,7 +132,7 @@ name as problem_dimension. Only use the strings in the table below (or none).
 | space       | too_wet   | too_dry                         |
 | dynamic     | over_compressed | under_compressed          |
 | masking     | masking (only one; no opposite)         |
-| clean       | clean (only one; fault-free state)      |
+| clean       | clean (fault-free or praise; no opposite) |
 | (none)      | none                                      |
 Meanings (what the class is — MixAssist source can be any stem, not only vocal):
 - too_loud: source sits way above the rest; drowning the mix; pure LEVEL
@@ -157,18 +148,20 @@ Meanings (what the class is — MixAssist source can be any stem, not only vocal
 - too_wet: drowned in reverb / too much room / wash / tail clutter.
 - too_dry: dead, close, disconnected; too little reverb/room/ambience.
   Opposite of too_wet.
-- over_compressed: squashed, flat, lifeless; dynamics flattened (loudness
-  may be held). NOT the same as too_loud (too_loud is gain only).
-- under_compressed: uneven, jumping around in level, uncontrolled dynamics
-  OR lacks punch/snap/transient. Opposite of over_compressed. Never "loud"
-  or "quiet" as the dim for either compression class.
+- over_compressed: squashed, flat, lifeless; dynamics flattened; no punch
+  left (robbed of impact). NOT the same as too_loud (too_loud is gain only).
+- under_compressed: uneven, jumping around in level, uncontrolled /
+  unpredictable dynamics. Opposite of over_compressed. NOT "lacks punch" —
+  lack of punch is over_compressed. Never "loud" or "quiet" as the dim
+  for either compression class.
 - masking: swallowed / covered / can't cut through because something else
   is in the way. The victim may be untouched while a competing source
   rises. Competition/obstruction words only — never bare "quiet"/"too soft"
   (those are too_quiet). Masking is not muddy: muddy = the source itself
   sounds thick; masking = another source is in the way.
-- clean: explicit fault-free / balanced / sits cleanly claim (concrete
-  sonic state). One of the 12 classes. Not vague "sounds good".
+- clean: fault-free / balanced / sits cleanly, OR praise/approval with no
+  defect ("sounds good", "perfect", "that's great", "I like it"). One of
+  the 12 classes. Do not send praise to none.
 - none: no supported problem and no clean claim, OR the current turn
   cannot distinguish which of the 12 it is.
 WHAT MUST STAY DISTINGUISHABLE (if CURRENT TURN could be either side → none)
@@ -177,7 +170,8 @@ WHAT MUST STAY DISTINGUISHABLE (if CURRENT TURN could be either side → none)
   in the low mids.
 - too_loud vs over_compressed: pure gain vs dynamics flattened. No brightness /
   thickness / space words for too_loud or too_quiet.
-- over_compressed vs under_compressed: squashed/lifeless vs uneven/unpredictable.
+- over_compressed vs under_compressed: squashed/lifeless/no punch left vs
+  uneven/jumping/unpredictable. "Needs more punch" is over, not under.
 - muddy vs dull: low mids vs up top.
 - harsh vs dull: opposite ends of the top.
 - too_wet vs too_dry: opposite amounts of ambience.
@@ -189,15 +183,18 @@ DECISION RULES
   "needs more ambience / too dry" = too_dry, NEVER too_wet; "too wet /
   washed out" = too_wet; "too quiet" = too_quiet; "too loud" = too_loud.
   Verify problem_text and dimension point the same way.
-- PUNCH / COMPRESSION (mandatory — easy to reverse):
-  * "needs more punch / snappier / could use punch / add transient shaping
-    to get hit back" → under_compressed (lack of punch). NEVER over_compressed.
-  * "too punchy" (peaks/transients too aggressive, uncontrolled hit) →
-    under_compressed (needs compression / dynamic control). NOT too_loud
-    and NOT over_compressed — even if someone lowers a fader as a workaround.
-  * "squashed / flat from compression / losing energy because compressor
-    attack/release/ratio is too aggressive" → over_compressed.
-    over_compressed means TOO LITTLE punch left after over-processing.
+- PUNCH / COMPRESSION (mandatory — easy to reverse; follow LEXICON_BRIEF):
+  * over_compressed = TOO LITTLE punch left: squashed / flat / lifeless /
+    crushed / pumping / "losing energy because the compressor is too hard" /
+    "robbed of punch" / "needs more punch" / "snappier" / "add punch back"
+    when the complaint is that it has no hit left. NEVER under_compressed.
+  * under_compressed = dynamics too VARIABLE: jumping around in level /
+    uneven / inconsistent / "too punchy" (peaks poke out, uncontrolled hit) /
+    needs compression or transient control to tame peaks. NOT too_loud.
+    NOT over_compressed.
+  * "Add a compressor" / "add punch" / "transient shaping" with NO stated
+    defect (not jumpy, not squashed) → none (enhancement, not a problem).
+  * Do not use too_loud / too_quiet for either compression class.
 - REVERB vs LEVEL (mandatory): if the talk is about reverb / send / room /
   delay / reverb-tail amount or audibility, use SPACE — not LEVEL on the
   dry stem. Examples:
@@ -234,8 +231,7 @@ FIELD RULES
   "low end". Resolve pronouns / "that" from HISTORY. Remember:
   problem_stem = affected; fix_stem = action target (may differ).
 - problem_speaker / fix_speaker: "amateur", "expert", or "".
-- vocal_lead: true ONLY for lead/main vocal; false for backing vocals /
-  doubles / harmonies (see FIGURE vs BAND).
+- vocal_lead: true ONLY for lead/main vocal; false otherwise.
 - has_speaker: true only if the problem or fix is attributable to a speaker.
 - fix_action: concise normalized action when explicit (lower_level,
   raise_level, eq_cut, eq_boost, add_reverb, reduce_reverb, add_compression,

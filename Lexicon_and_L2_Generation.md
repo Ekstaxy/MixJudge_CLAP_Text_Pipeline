@@ -84,7 +84,7 @@ MixAssist turns get labeled with the **7 axes / 12 classes** (11 problems + `cle
 | space      | too_wet, too_dry                                  |
 | dynamic    | over_compressed, under_compressed                 |
 | masking    | masking (no opposite)                             |
-| clean      | clean (fault-free state, not vague "sounds good") |
+| clean      | clean (fault-free, or praise / "sounds good" with no defect) |
 
 
 `none` = no supported problem. One turn can explode into multiple rows if there are two clear problems.
