@@ -92,7 +92,7 @@ MixAssist turns get labeled with the **7 axes / 12 classes** (11 problems + `cle
 The key rules baked into the prompt:
 
 - Be conservative. Workflow / preference talk / "add saturation for warmth" with no stated defect → not a problem.
-- CURRENT TURN is primary. HISTORY is only used for pronouns, unfinished thoughts, and confirming an ongoing fault is the same one. Don't re-report an old problem the current turn has already moved past.
+- CURRENT TURN must be enough to pick the dimension by itself. If this turn without history could be more than one class (or none), label `none`. HISTORY only helps pronouns / which stem — it cannot break a dim tie.
 - `problem_stem` = the thing that sounds wrong / is getting covered up. `fix_stem` = what actually gets adjusted. These can differ (the snare's lost, but you pull the cymbal).
 - The subject of the complaint in MixAssist can be anything. For MixJudge captions later, the vocal is always the subject.
 - Polarity: "needs more reverb" is `too_dry`, never `too_wet`. Wanting more punch/snap is `under_compressed`, not over. Reverb send talk is SPACE, not LEVEL.
@@ -131,7 +131,7 @@ L1 is composed as:
 The [SUBJECT] [COPULA] [QUALITY] [SCOPE]? .
 ```
 
-Always about the vocal. `SUBJECT` is randomly picked from `the lead vocal` / `the singer` / `the vocal` / `the voice`. `COPULA` is randomly `is` / `sounds`. `QUALITY` is randomly picked from the MixAssist quality lexicon (`quality_from_manual` — the degree-compatible / standalone wording we extracted per dim). `SCOPE` is attached when that dim has one.
+Always about the vocal. `SUBJECT` is randomly picked from `the lead vocal` / `the singer` / `the vocal` / `the voice`. `COPULA` is randomly `is` / `sounds`. `QUALITY` is randomly picked from `quality_from_manual` **degree_compatible** only (not standalone). `SCOPE` is attached when that dim has one.
 
 No `clean` in this L1 set. 11 dims × 20 captions × 3 modes.
 

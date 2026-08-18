@@ -2,8 +2,8 @@
 """L1 captions: The [SUBJECT] [COPULA] [QUALITY] [SCOPE]? .
 
 SUBJECT / COPULA are sampled. QUALITY is sampled from
-outputs/quality_from_manual/quality_from_manual.json (degree_compatible or
-standalone). SCOPE comes from that same file when the dim lists one.
+outputs/quality_from_manual/quality_from_manual.json (degree_compatible only).
+SCOPE comes from that same file when the dim lists one.
 """
 
 from __future__ import annotations
@@ -147,24 +147,16 @@ def sample_quality(
     *,
     lexicon: dict | None = None,
 ) -> tuple[str, str, str]:
-    """Return (quality, kind, scope). kind is degree_compatible | standalone | fallback."""
+    """Return (quality, kind, scope). QUALITY is degree_compatible only."""
     dim = (dim or "").strip().lower()
     data = lexicon if lexicon is not None else load_quality_lexicon()
     entry = data.get(dim) or {}
     degree = _clean_phrases(entry.get("degree_compatible"))
-    standalone = _clean_phrases(entry.get("standalone"))
-    kinds: list[str] = []
-    if degree:
-        kinds.append("degree_compatible")
-    if standalone:
-        kinds.append("standalone")
-    if not kinds:
+    if not degree:
         return QUALITY_BY_DIM[dim], "fallback", ""
-    kind = rng.choice(kinds)
-    pool = degree if kind == "degree_compatible" else standalone
-    quality = rng.choice(pool)
+    quality = rng.choice(degree)
     scope = rng.choice(parse_scopes(str(entry.get("scope") or "")))
-    return quality, kind, scope
+    return quality, "degree_compatible", scope
 
 
 def capitalize_subject(subject: str) -> str:
