@@ -74,7 +74,7 @@ MixAssist 每一筆樣本對應 Amateur（user）與 Expert（assistant）的一
 
 ### 3.2 Axis 與 Dimension 詞彙
 
-我們採用八個混音感知軸，每個軸對應一組有符號方向的 dimensions（phase 僅單向；另含 `none` 表示無支持問題）：
+採用 MixJudge **7 axes / 12 classes**（11 problem + `clean`；見 [`LEXICON_BRIEF.md`](LEXICON_BRIEF.md)）。模型只輸出 `problem_dimension`，axis 由 code 反查。`none` 表示無支持問題、或 CURRENT TURN 無法在 12 類中區分。
 
 | Axis | Dimensions |
 |------|------------|
@@ -83,11 +83,12 @@ MixAssist 每一筆樣本對應 Amateur（user）與 Expert（assistant）的一
 | brightness | harsh, dull |
 | space | too_wet, too_dry |
 | dynamic | over_compressed, under_compressed |
-| masking | swamping, invading |
-| stereo | too_wide, too_narrow |
-| phase | phase |
+| masking | masking |
+| clean | clean |
 
-`problem_stem` / `fix_stem` 則限制在一組固定樂器與 `mix` 等詞彙上（如 vocal、kick、snare、cymbals、ambience 等）；無法對應者歸為 `other`。`vocal_lead` 另以布林標示該標籤是否涉及主唱（lead vocal），以區分 backing vocals 等同為 vocal stem 的情形。
+BRIEF 要求必須可區分的對（模糊則標 `none`）：`too_quiet` vs `masking`、`masking` vs `muddy`、`too_loud` vs `over_compressed`、`over_compressed` vs `under_compressed`、`muddy` vs `dull`、以及 harsh/dull、too_wet/too_dry、thin/muddy 方向對。
+
+`problem_stem` / `fix_stem` 限制在固定樂器與 `mix` 等詞彙（vocal、kick、snare、cymbals、ambience 等）；無法對應者歸為 `other`。`vocal_lead` 另以布林標示該標籤是否涉及主唱（lead vocal）。
 
 `confidence` 分為 low / mid / high，用以反映證據強度：直接明文較高；需仰賴歷史才能還原受影響 stem 或延續問題者居中；仍有用但模糊者偏低。
 

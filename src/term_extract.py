@@ -5,9 +5,12 @@ MixAssist blind lexicon pipeline.
 Stages:
   1) extract  — Gemma (GGUF) dumps free-form (target, desc) pairs
   2) map      — hierarchical assign (centroid / clap):
-                  first 8 axes, then within that axis split into its 2 dims
-                  (phase has only 1 dim)
+                  first 7 axes, then within that axis split into dims
+                  (masking / clean have only 1 dim each)
   3) export   — review CSVs for axis and dimension (corrected_* empty)
+
+Lexicon taxonomy follows MixJudge caption ontology (same DIMENSION_TO_AXIS
+as labeling): 12 classes = 11 problem dims + clean; 7 axes.
 
 Usage (from repo root):
   python src/term_extract.py extract --splits train --limit 5
@@ -31,8 +34,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -60,6 +63,7 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
 DEFAULT_EMBED_MODEL = "sentence-transformers/all-mpnet-base-v2"
 DEFAULT_CLAP_MODEL = "laion/clap-htsat-unfused"
 
+# Axes / dims shared with labeling (MixJudge 12 classes). Seeds stay local.
 AXES = (
     "level",
     "body",
@@ -67,73 +71,119 @@ AXES = (
     "space",
     "dynamic",
     "masking",
-    "stereo",
-    "phase",
+    "clean",
 )
 
-# Same 15 signed dims as labeling (order stable for scoring matrices).
 DIMENSIONS = tuple(DIMENSION_TO_AXIS.keys())
 
-# axis → its signed dims (usually 2; phase → 1)
+# axis → dims (pairs of 2; masking / clean → 1)
 AXIS_TO_DIMS: dict[str, tuple[str, ...]] = {}
 for _dim, _axis in DIMENSION_TO_AXIS.items():
     AXIS_TO_DIMS.setdefault(_axis, [])
     AXIS_TO_DIMS[_axis].append(_dim)
 AXIS_TO_DIMS = {a: tuple(AXIS_TO_DIMS[a]) for a in AXES}
 
-# 8-axis seed anchors
+# 7-axis seed anchors
+# Adjustments below are driven only by misplaced descs in
+# lexicon_review_centroid_dim.csv (remove magnets / move wrong-dim hits).
 SEED_WORDS_AXIS = {
     "level": [
         "loud", "quiet", "too loud", "too quiet",
         "overpowering", "inaudible", "can't hear", "volume",
     ],
     "body": [
+        # removed "full" (pulled wide/wider → muddy), "lacks body" (pulled gives it some body → thin)
         "muddy", "muddiness", "mud", "thin", "boomy",
-        "full", "lacks body", "low-end mud", "thick",
+        "low-end mud", "thick",
     ],
     "brightness": [
+        # removed sparkly/shimmer (pulled sparkliness / add some sparkle → dull)
         "harsh", "bright", "too bright", "dull", "dark",
-        "sibilant", "piercing", "sparkly", "shimmer", "high end",
+        "sibilant", "piercing", "edgy", "fatiguing", "high end",
     ],
     "space": [
+        # removed airy / in a space (pulled airiness / give it some air → too_dry)
         "dry", "too dry", "wet", "too wet", "washed out",
-        "distant", "airy", "in a space", "closely miked", "too much reverb",
+        "distant", "closely miked", "too much reverb", "no reverb",
     ],
     "dynamic": [
-        "punchy", "flat", "squashed", "pumping", "tight",
+        # keep punchy here so punchier hits dynamic not brightness/harsh
+        "punchy", "punchier", "flat", "squashed", "pumping", "tight",
         "pinched", "over compressed", "no dynamics", "transient", "clicky",
     ],
+    # competition / obstruction only — avoid bare loudness words (vs level)
     "masking": [
-        "masked", "overcrowded", "drowned", "gets lost", "buried"
+        "masked", "overcrowded", "drowned", "gets lost", "buried",
         "bleeding", "getting in the way", "covered by", "swamping", "muffled",
     ],
-    "stereo": [
-        "wide", "narrow", "too wide", "too narrow",
-        "panned", "mono", "centered", "to the side", "left and right",
-    ],
-    "phase": [
-        "phasing", "phasing issues", "phasey", "out of phase",
-        "phase cancellation", "not time aligned", "canceled", "polarity",
+    # fault-free / no degradation (wet stem untouched)
+    "clean": [
+        "clean", "balanced", "sits cleanly", "well balanced",
+        "clear and balanced", "no issues", "sounds good in the mix",
+        "natural and clear",
     ],
 }
 
-# 15-dimension seed anchors (aligned with labeling DIMENSION_TO_AXIS)
+# 12 classes = 11 problem dims + clean
+# Seed edits from misplaced CSV descs only (not newly invented phrases).
 SEED_WORDS_DIM: dict[str, list[str]] = {
-    "too_quiet": ["too quiet", "quiet", "buried", "inaudible", "too soft", "can't hear"],
-    "too_loud": ["too loud", "loud", "overpowering", "way too loud", "front"],
-    "muddy": ["muddy", "muddiness", "mud", "boomy", "cloudy", "thick low end"],
-    "thin": ["thin", "skinny", "anemic", "lacks body", "no weight"],
-    "harsh": ["harsh", "harshness", "sibilant", "piercing", "too bright", "presence", "sparkle"],
-    "dull": ["dull", "dark", "lacks air", "lifeless top", "no sparkle"],
-    "too_wet": ["too wet", "washed out", "too much reverb", "big reverb"],
-    "too_dry": ["too dry", "dry", "no reverb", "boxy", "needs space"],
-    "over_compressed": ["over compressed", "squashed", "pumping", "no dynamics", "flat"],
-    "under_compressed": ["under compressed", "uncontrolled", "jumpy", "too dynamic", "needs compression"],
-    "swamping": ["swamping", "drowned", "covered by", "overcrowded", "masking the vocal"],
-    "invading": ["invading", "sticking out", "poking through", "cutting through too much"],
-    "too_wide": ["too wide", "wide", "overspread", "spread too much", "spacey"],
-    "too_narrow": ["too narrow", "narrow", "mono", "too centered"],
-    "phase": ["phasey", "hollow", "canceled", "phase cancellation", "polarity"],
+    "too_quiet": [
+        "too quiet", "quiet", "barely audible", "inaudible",
+        "too soft", "can't hear", "lost under the band",
+    ],
+    "too_loud": [
+        "too loud", "loud", "overpowering", "way too loud",
+        "blasting over the band", "far too dominant",
+    ],
+    "muddy": [
+        "muddy", "boomy", "boxy", "congested", "woolly", "thick in the low mids",
+    ],
+    "thin": [
+        # removed "lacks body" / "small and lacking body" — magnet for "gives it some body"
+        "thin", "hollow", "weedy", "no weight",
+    ],
+    "harsh": [
+        # CSV: bright / so bright / more bright were wrongly → dull; anchor them here
+        # (brighten / add some sparkle are wish phrases — not added as seeds)
+        "harsh", "piercing", "brittle", "edgy", "fatiguing", "sibilant",
+        "bright", "too bright", "so bright", "more bright",
+    ],
+    "dull": [
+        # removed "lacking air" / "no shine" — magnets for brighten / add some sparkle / sparkliness
+        "dull", "dark", "veiled", "lidded",
+    ],
+    "too_wet": [
+        # CSV correctly had these on too_wet — reinforce
+        "too wet", "washed out", "drowned in reverb", "swimming in ambience",
+        "too much reverb", "distant and diffuse",
+        "super wet", "100% wet",
+    ],
+    "too_dry": [
+        # removed "without any ambience" — magnet for airiness / give it some air / airy
+        "too dry", "bone dry", "no reverb",
+        "disconnected from the room", "pasted on top of the mix",
+    ],
+    "over_compressed": [
+        "over compressed", "squashed", "flattened", "lifeless",
+        "pumping", "no dynamics", "crushed flat",
+    ],
+    "under_compressed": [
+        # CSV: punchier was wrongly → harsh; "needs compression" pulled wish phrasing
+        "under compressed", "uneven", "jumping around in level",
+        "uncontrolled", "wildly inconsistent",
+        "punchier", "a little bit punchier",
+    ],
+    # no "quiet" / "soft" / bare "buried" — those belong to too_quiet
+    "masking": [
+        "masked", "overcrowded", "drowned", "gets lost", "buried",
+        "bleeding", "getting in the way", "covered by", "swamping", "muffled",
+    ],
+    # no fault; brief: "sits cleanly", "mix is balanced" (no slot grammar)
+    "clean": [
+        "clean", "balanced", "sits cleanly", "the mix is balanced",
+        "clear and balanced", "natural and clear", "sits well in the mix",
+        "no mix problems",
+    ],
 }
 
 TEMPERATURE = 0.1
@@ -151,6 +201,211 @@ def resolve_methods(method: str) -> list[str]:
     return ["centroid", "clap"] if method == "both" else [method]
 
 
+# ====================== post-filter (after nearest-seed map) ======================
+# Lightweight rules: drop retired/noise phrasing; fix common polarity / wish mistakes.
+# Edits assigned_* only. Human overrides stay in corrected_*.
+
+_DROP_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(pan|panned|panning)\b", re.I), "stereo"),
+    (re.compile(r"\b(left ear|right ear)\b", re.I), "stereo"),
+    (re.compile(r"\b(sounds?\s+)?mono\b", re.I), "stereo"),
+    (re.compile(r"\b(too wide|widen|wider)\b", re.I), "stereo"),
+    (re.compile(r"^wide$", re.I), "stereo"),
+    (re.compile(r"\bsound better\b", re.I), "noise"),
+    (re.compile(r"\bsoulful\b", re.I), "noise"),
+    (re.compile(r"^(weird|sounds weird|sounds funky|bit strange|sucks)$", re.I), "noise"),
+    (re.compile(r"^more$", re.I), "noise"),
+    (re.compile(r"^better$", re.I), "noise"),
+    (re.compile(r"^simple$", re.I), "noise"),
+    (re.compile(r"^characteristic$", re.I), "noise"),
+    (re.compile(r"^not loving$", re.I), "noise"),
+]
+
+# (pattern, new_dimension, note_tag) — first match wins
+_RELABEL_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (
+        re.compile(
+            r"\b(brighten(s| it up)?|add(ing)? some sparkle|shimmer a little bit more|"
+            r"more air|give(s| it)? some air|giving it the airiness|clearer tone)\b",
+            re.I,
+        ),
+        "dull",
+        "wish→dull",
+    ),
+    (
+        re.compile(
+            r"\b(could be a little quieter|a little bit quieter|"
+            r"needs? to come down|need to go .+ down|can come down|go down|"
+            r"turn(ing)? (it |them |that \w+ )?down|"
+            r"does not need nearly as much volume|should be lowered|"
+            r"could be turned down)\b",
+            re.I,
+        ),
+        "too_loud",
+        "wish→too_loud",
+    ),
+    (
+        re.compile(
+            r"\b(needs? to come up|need to come up|sing louder|pull the voice up|"
+            r"bring .+ up a little)\b",
+            re.I,
+        ),
+        "too_quiet",
+        "wish→too_quiet",
+    ),
+]
+
+
+def _append_note(existing: str, tag: str) -> str:
+    tag = f"post:{tag}"
+    if not existing:
+        return tag
+    if tag in existing:
+        return existing
+    return f"{existing}; {tag}"
+
+
+def decide_post_rule(desc: str, assigned_dimension: str) -> tuple[str, str | None, str | None]:
+    """Return (action, new_dim_or_None, note_tag).
+    action: 'keep' | 'drop' | 'relabel'
+    """
+    text = (desc or "").strip()
+    if not text:
+        return "drop", None, "empty"
+
+    for pat, tag in _DROP_PATTERNS:
+        if pat.search(text):
+            return "drop", None, tag
+
+    for pat, new_dim, tag in _RELABEL_PATTERNS:
+        if pat.search(text):
+            if new_dim != assigned_dimension:
+                return "relabel", new_dim, tag
+            return "keep", None, None
+
+    # bare loudness wish stuck on masking → too_quiet family already handled;
+    # if masking but text is pure "come up" etc., covered above.
+    return "keep", None, None
+
+
+def apply_post_rules(terms: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Filter/relabel mapped terms in place-style; returns (kept, stats)."""
+    stats = {"kept": 0, "dropped": 0, "relabeled": 0}
+    out: list[dict] = []
+    for t in terms:
+        desc = t.get("desc", "")
+        old_dim = t.get("assigned_dimension", "")
+        action, new_dim, tag = decide_post_rule(desc, old_dim)
+        if action == "drop":
+            stats["dropped"] += 1
+            continue
+        if action == "relabel" and new_dim:
+            t = dict(t)
+            t["assigned_dimension"] = new_dim
+            t["assigned_axis"] = DIMENSION_TO_AXIS.get(new_dim, t.get("assigned_axis", ""))
+            t["dimension_axis"] = t["assigned_axis"]
+            t["post_note"] = tag or ""
+            # keep dimension_scores but mark note for export
+            stats["relabeled"] += 1
+        else:
+            stats["kept"] += 1
+        out.append(t)
+    return out, stats
+
+
+def apply_post_rules_csv_rows(
+    rows: list[dict],
+    *,
+    label_key: str,
+) -> tuple[list[dict], list[dict]]:
+    """Apply rules to review CSV rows. Returns (new_rows, change_records)."""
+    new_rows: list[dict] = []
+    changes: list[dict] = []
+    for row in rows:
+        desc = row.get("desc", "")
+        if label_key == "assigned_dimension":
+            old = (row.get("assigned_dimension") or "").strip()
+            action, new_dim, tag = decide_post_rule(desc, old)
+            if action == "drop":
+                changes.append(
+                    {
+                        "action": "drop",
+                        "desc": desc,
+                        "from": old,
+                        "to": "",
+                        "note": tag or "",
+                    }
+                )
+                continue
+            row = dict(row)
+            if action == "relabel" and new_dim:
+                row["assigned_dimension"] = new_dim
+                row["dimension_axis"] = DIMENSION_TO_AXIS.get(new_dim, row.get("dimension_axis", ""))
+                row["notes"] = _append_note(row.get("notes") or "", tag or "relabel")
+                changes.append(
+                    {
+                        "action": "relabel",
+                        "desc": desc,
+                        "from": old,
+                        "to": new_dim,
+                        "note": tag or "",
+                    }
+                )
+            new_rows.append(row)
+        else:
+            # axis CSV: drop stereo/noise; if dim-side relabel known, sync axis
+            old_ax = (row.get("assigned_axis") or "").strip()
+            # Use dimension_axis hint if present; else treat via desc-only dim rules
+            # Infer by running dim decision against empty old dim only for drop;
+            # for relabel, map new dim → axis.
+            action, new_dim, tag = decide_post_rule(desc, "")
+            if action == "drop":
+                changes.append(
+                    {
+                        "action": "drop",
+                        "desc": desc,
+                        "from": old_ax,
+                        "to": "",
+                        "note": tag or "",
+                    }
+                )
+                continue
+            row = dict(row)
+            if action == "relabel" and new_dim:
+                new_ax = DIMENSION_TO_AXIS[new_dim]
+                if new_ax != old_ax:
+                    row["assigned_axis"] = new_ax
+                    row["dimension_axis"] = new_ax
+                    row["notes"] = _append_note(row.get("notes") or "", tag or "relabel")
+                    changes.append(
+                        {
+                            "action": "relabel",
+                            "desc": desc,
+                            "from": old_ax,
+                            "to": new_ax,
+                            "note": tag or "",
+                        }
+                    )
+            new_rows.append(row)
+    return new_rows, changes
+
+
+def _load_csv_corrections(path: Path, corrected_key: str) -> dict[str, dict[str, str]]:
+    """Load human corrected_* / notes keyed by term_key(target, desc)."""
+    if not path.exists():
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            k = term_key(row.get("target", ""), row.get("desc", ""))
+            corr = (row.get(corrected_key) or "").strip()
+            notes = (row.get("notes") or "").strip()
+            if corr or notes:
+                out[k] = {"corrected": corr, "notes": notes}
+    return out
+
+
+# ====================== paths ======================
 def raw_jsonl_path(output_dir: Path, split: str) -> Path:
     return output_dir / f"lexicon_raw_{split}.jsonl"
 
@@ -171,41 +426,8 @@ def compare_csv_path(output_dir: Path, level: str) -> Path:
     return output_dir / f"lexicon_review_compare_{level}.csv"
 
 
-# ====================== GGUF ======================
-def _prepare_cuda_libs() -> None:
-    """Preload CUDA 12 libs for llama-cpp (same as labeling_gguf)."""
-    import ctypes
-
-    nvidia_root = Path.home() / ".local/lib/python3.12/site-packages/nvidia"
-    must = [
-        Path("/usr/lib/x86_64-linux-gnu/libcuda.so.1"),
-        nvidia_root / "cuda_runtime/lib/libcudart.so.12",
-        nvidia_root / "nvjitlink/lib/libnvJitLink.so.12",
-        nvidia_root / "cublas/lib/libcublasLt.so.12",
-        nvidia_root / "cublas/lib/libcublas.so.12",
-    ]
-    extras = [str(p) for p in nvidia_root.glob("*/lib")]
-    host = ["/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]
-    old = [p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if p and "cuda/compat" not in p]
-    os.environ["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys(host + extras + old))
-    for path in must:
-        ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-
-
-def load_llm(model_path: Path, n_ctx: int, n_gpu_layers: int, verbose: bool):
-    from llama_cpp import Llama
-
-    print(f"載入 GGUF → GPU: {model_path} (n_gpu_layers={n_gpu_layers}, n_ctx={n_ctx})")
-    llm = Llama(
-        model_path=str(model_path),
-        n_gpu_layers=n_gpu_layers,
-        n_ctx=n_ctx,
-        n_batch=N_BATCH,
-        n_ubatch=N_BATCH,
-        verbose=verbose,
-    )
-    print("模型載入完成。")
-    return llm
+# ====================== GGUF (delegates to labeling_gguf; single GPU by default) ======================
+# load_llm / CUDA preload live in labeling.labeling_gguf.
 
 
 def call_llm(llm, system_prompt: str, user_message: str) -> str:
@@ -322,8 +544,23 @@ def aggregate_raw(output_dir: Path, splits: list[str]) -> dict:
 
 # ====================== extract ======================
 def cmd_extract(args: argparse.Namespace) -> None:
-    _prepare_cuda_libs()
-    llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+    # Lazy import so map/export do not pull llama-cpp / CUDA preload.
+    from labeling.labeling_gguf import load_llm, parse_tensor_split
+
+    tensor_split = (
+        args.tensor_split
+        if isinstance(args.tensor_split, list)
+        else parse_tensor_split(args.tensor_split)
+    )
+    llm = load_llm(
+        args.model_path,
+        args.n_ctx,
+        args.n_gpu_layers,
+        args.verbose,
+        n_batch=args.n_batch,
+        tensor_split=tensor_split,
+        disable_tensor_split=args.no_tensor_split,
+    )
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     if args.seed is not None:
@@ -421,10 +658,10 @@ def _hierarchical_assign(
     method: str,
     min_sim: float,
 ) -> list[dict]:
-    """Step1: nearest of 8 axes. Step2: nearest of that axis's 2 dims (phase: 1)."""
+    """Step1: nearest of 7 axes. Step2: nearest dim within that axis (masking/clean: 1)."""
     import numpy as np
 
-    axis_sims = emb @ axis_mat.T  # (N, 8)
+    axis_sims = emb @ axis_mat.T  # (N, n_axes)
     mapped = []
     for i, term in enumerate(terms):
         axis_scores = {ax: float(axis_sims[i, j]) for j, ax in enumerate(AXES)}
@@ -482,7 +719,7 @@ def map_centroid(
     def encode(texts: list[str]):
         return model.encode(texts, normalize_embeddings=True, show_progress_bar=False, batch_size=batch_size)
 
-    print("[centroid] hierarchical: 8 axes → then 2 dims within axis")
+    print("[centroid] hierarchical: 7 axes → then dims within axis (12 classes)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[centroid] embedding {len(descs)} unique descs ...")
@@ -526,7 +763,7 @@ def map_clap(
     def encode(texts: list[str]):
         return _clap_encode_texts(model, processor, texts, device, batch_size)
 
-    print("[clap] hierarchical: 8 axes → then 2 dims within axis")
+    print("[clap] hierarchical: 7 axes → then dims within axis (12 classes)")
     axis_mat, dim_centroids = _build_label_centroids(encode)
     descs = [t["desc"] for t in terms]
     print(f"[clap] embedding {len(descs)} unique descs ...")
@@ -555,6 +792,12 @@ def cmd_map(args: argparse.Namespace) -> dict[str, list[dict]]:
         else:
             mapped = map_clap(terms, args.clap_model, args.min_sim, args.batch_size, device)
             model_name = args.clap_model
+
+        mapped, post_stats = apply_post_rules(mapped)
+        print(
+            f"[post] {method}: kept={post_stats['kept']} "
+            f"relabeled={post_stats['relabeled']} dropped={post_stats['dropped']}"
+        )
 
         path = mapped_path(output_dir, method)
         path.write_text(
@@ -613,61 +856,77 @@ def _example_turn(term: dict) -> str:
 
 
 def export_axis(mapped: list[dict], path: Path) -> None:
-    rows = [
-        {
-            "target": t.get("target", ""),
-            "desc": t.get("desc", ""),
-            "count": t.get("count", 0),
-            "assigned_axis": t.get("assigned_axis", ""),
-            "similarity": t.get("axis_similarity", ""),
-            "low_confidence": t.get("axis_low_confidence", False),
-            "dimension_axis": t.get("dimension_axis", ""),
-            "corrected_axis": "",
-            "notes": "",
-            "example_turn": _example_turn(t),
-            "scores_json": json.dumps(t.get("axis_scores") or {}, ensure_ascii=False),
-        }
-        for t in sorted(
-            mapped,
-            key=lambda x: (x.get("assigned_axis", ""), -float(x.get("axis_similarity") or 0), x.get("desc", "")),
+    prev = _load_csv_corrections(path, "corrected_axis")
+    rows = []
+    for t in sorted(
+        mapped,
+        key=lambda x: (x.get("assigned_axis", ""), -float(x.get("axis_similarity") or 0), x.get("desc", "")),
+    ):
+        k = term_key(t.get("target", ""), t.get("desc", ""))
+        human = prev.get(k, {})
+        note = human.get("notes") or ""
+        if t.get("post_note"):
+            note = _append_note(note, t["post_note"])
+        rows.append(
+            {
+                "target": t.get("target", ""),
+                "desc": t.get("desc", ""),
+                "count": t.get("count", 0),
+                "assigned_axis": t.get("assigned_axis", ""),
+                "similarity": t.get("axis_similarity", ""),
+                "low_confidence": t.get("axis_low_confidence", False),
+                "dimension_axis": t.get("dimension_axis", ""),
+                "corrected_axis": human.get("corrected", ""),
+                "notes": note,
+                "example_turn": _example_turn(t),
+                "scores_json": json.dumps(t.get("axis_scores") or {}, ensure_ascii=False),
+            }
         )
-    ]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REVIEW_FIELDS_AXIS)
         w.writeheader()
         w.writerows(rows)
-    print(f"[export] axis {len(rows)} rows → {path}")
+    n_corr = sum(1 for r in rows if r["corrected_axis"])
+    print(f"[export] axis {len(rows)} rows (merged corrected={n_corr}) → {path}")
 
 
 def export_dim(mapped: list[dict], path: Path) -> None:
-    rows = [
-        {
-            "target": t.get("target", ""),
-            "desc": t.get("desc", ""),
-            "count": t.get("count", 0),
-            "assigned_dimension": t.get("assigned_dimension", ""),
-            "similarity": t.get("dimension_similarity", ""),
-            "low_confidence": t.get("dimension_low_confidence", False),
-            "dimension_axis": t.get("dimension_axis", ""),
-            "corrected_dimension": "",
-            "notes": "",
-            "example_turn": _example_turn(t),
-            "scores_json": json.dumps(t.get("dimension_scores") or {}, ensure_ascii=False),
-        }
-        for t in sorted(
-            mapped,
-            key=lambda x: (
-                x.get("assigned_dimension", ""),
-                -float(x.get("dimension_similarity") or 0),
-                x.get("desc", ""),
-            ),
+    prev = _load_csv_corrections(path, "corrected_dimension")
+    rows = []
+    for t in sorted(
+        mapped,
+        key=lambda x: (
+            x.get("assigned_dimension", ""),
+            -float(x.get("dimension_similarity") or 0),
+            x.get("desc", ""),
+        ),
+    ):
+        k = term_key(t.get("target", ""), t.get("desc", ""))
+        human = prev.get(k, {})
+        note = human.get("notes") or ""
+        if t.get("post_note"):
+            note = _append_note(note, t["post_note"])
+        rows.append(
+            {
+                "target": t.get("target", ""),
+                "desc": t.get("desc", ""),
+                "count": t.get("count", 0),
+                "assigned_dimension": t.get("assigned_dimension", ""),
+                "similarity": t.get("dimension_similarity", ""),
+                "low_confidence": t.get("dimension_low_confidence", False),
+                "dimension_axis": t.get("dimension_axis", ""),
+                "corrected_dimension": human.get("corrected", ""),
+                "notes": note,
+                "example_turn": _example_turn(t),
+                "scores_json": json.dumps(t.get("dimension_scores") or {}, ensure_ascii=False),
+            }
         )
-    ]
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=REVIEW_FIELDS_DIM)
         w.writeheader()
         w.writerows(rows)
-    print(f"[export] dim {len(rows)} rows → {path}")
+    n_corr = sum(1 for r in rows if r["corrected_dimension"])
+    print(f"[export] dim {len(rows)} rows (merged corrected={n_corr}) → {path}")
 
 
 def export_compare(
@@ -683,6 +942,8 @@ def export_compare(
     by_p = {term_key(t["target"], t["desc"]): t for t in clap_terms}
     label_c = f"centroid_{level}"
     label_p = f"clap_{level}"
+    corr_key = f"corrected_{level}"
+    prev = _load_csv_corrections(path, corr_key)
     fields = [
         "target",
         "desc",
@@ -692,7 +953,7 @@ def export_compare(
         label_p,
         "clap_sim",
         "agree",
-        f"corrected_{level}",
+        corr_key,
         "notes",
         "example_turn",
     ]
@@ -706,6 +967,7 @@ def export_compare(
         agree = bool(c_lab and p_lab and c_lab == p_lab)
         if agree:
             agree_n += 1
+        human = prev.get(k, {})
         rows.append(
             {
                 "target": base.get("target", ""),
@@ -716,8 +978,8 @@ def export_compare(
                 label_p: p_lab,
                 "clap_sim": (p or {}).get(sim_key, ""),
                 "agree": agree,
-                f"corrected_{level}": "",
-                "notes": "",
+                corr_key: human.get("corrected", ""),
+                "notes": human.get("notes", ""),
                 "example_turn": _example_turn(base),
             }
         )
@@ -730,6 +992,57 @@ def export_compare(
         f"[export] compare_{level} {len(rows)} rows, agree={agree_n}/{len(rows)} "
         f"({100.0 * agree_n / max(len(rows), 1):.1f}%) → {path}"
     )
+
+
+def _write_postfilter_diff(path: Path, changes: list[dict], level: str) -> None:
+    lines = [f"# postfilter {level} changes: {len(changes)}", ""]
+    by_act: dict[str, list[dict]] = {}
+    for ch in changes:
+        by_act.setdefault(ch["action"], []).append(ch)
+    for act in ("drop", "relabel"):
+        items = by_act.get(act, [])
+        lines.append(f"## {act} ({len(items)})")
+        for ch in items:
+            if act == "drop":
+                lines.append(f"- [{ch['from']}] {ch['desc']!r}  ({ch['note']})")
+            else:
+                lines.append(
+                    f"- {ch['from']} → {ch['to']}: {ch['desc']!r}  ({ch['note']})"
+                )
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[post] wrote diff → {path}")
+
+
+def cmd_postfilter(args: argparse.Namespace) -> None:
+    """Apply post-rules to existing review CSVs (no remap). Preserves corrected_*."""
+    output_dir: Path = args.output_dir
+    for method in resolve_methods(args.method):
+        for level, fields, label_key in (
+            ("dim", REVIEW_FIELDS_DIM, "assigned_dimension"),
+            ("axis", REVIEW_FIELDS_AXIS, "assigned_axis"),
+        ):
+            path = review_csv_path(output_dir, method, level)
+            if not path.exists():
+                print(f"[post] skip missing {path}")
+                continue
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+            bak = path.with_suffix(".before_postfilter.csv")
+            if not bak.exists():
+                bak.write_text(path.read_text(encoding="utf-8-sig"), encoding="utf-8-sig")
+                print(f"[post] backup → {bak}")
+            new_rows, changes = apply_post_rules_csv_rows(rows, label_key=label_key)
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                w.writeheader()
+                w.writerows(new_rows)
+            diff_path = output_dir / f"lexicon_postfilter_diff_{method}_{level}.md"
+            _write_postfilter_diff(diff_path, changes, f"{method}/{level}")
+            print(
+                f"[post] {method}/{level}: {len(rows)} → {len(new_rows)} "
+                f"(changes={len(changes)}) → {path}"
+            )
 
 
 def _load_mapped(output_dir: Path, method: str, cache: dict[str, list[dict]] | None) -> list[dict]:
@@ -793,7 +1106,19 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--seed", type=int, default=None)
     pe.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
     pe.add_argument("--n-ctx", type=int, default=N_CTX)
+    pe.add_argument("--n-batch", type=int, default=N_BATCH)
     pe.add_argument("--n-gpu-layers", type=int, default=N_GPU_LAYERS)
+    pe.add_argument(
+        "--tensor-split",
+        type=str,
+        default=None,
+        help="Multi-GPU proportions, e.g. 0.5,0.5. Off by default (single GPU).",
+    )
+    pe.add_argument(
+        "--no-tensor-split",
+        action="store_true",
+        help="Force no tensor_split (already the default)",
+    )
     pe.add_argument("--verbose", action="store_true")
     pe.add_argument("--overwrite", action="store_true")
 
@@ -816,19 +1141,30 @@ def build_parser() -> argparse.ArgumentParser:
             help="map device (auto falls back to cpu if CUDA alloc fails)",
         )
 
-    add_map_args(sub.add_parser("map", help="Map descs: 8 axes, then 2 dims within axis"))
+    add_map_args(sub.add_parser("map", help="Map descs: 7 axes → 12 MixJudge classes (11+clean)"))
     px = sub.add_parser("export", help="Write axis/dim review CSV(s)")
     add_io(px)
     px.add_argument("--method", choices=METHODS, default="both")
     add_map_args(sub.add_parser("map-and-export", help="map then export"))
+
+    pp = sub.add_parser(
+        "postfilter",
+        help="Apply drop/relabel rules to existing review CSVs (no remap)",
+    )
+    add_io(pp)
+    pp.add_argument("--method", choices=METHODS, default="centroid")
     return p
 
 
 def main() -> None:
     args = build_parser().parse_args()
-    {"extract": cmd_extract, "map": cmd_map, "export": cmd_export, "map-and-export": cmd_map_and_export}[
-        args.command
-    ](args)
+    {
+        "extract": cmd_extract,
+        "map": cmd_map,
+        "export": cmd_export,
+        "map-and-export": cmd_map_and_export,
+        "postfilter": cmd_postfilter,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

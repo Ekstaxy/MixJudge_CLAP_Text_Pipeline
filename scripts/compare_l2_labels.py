@@ -46,6 +46,8 @@ def has_error(row: dict) -> bool:
 
 def is_problem_row(row: dict) -> bool:
     dim = str(row.get("problem_dimension") or "").strip().lower()
+    if dim == "clean":
+        return True
     return is_true(row.get("has_problem", "")) and dim not in ("", "none")
 
 

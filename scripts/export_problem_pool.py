@@ -58,9 +58,10 @@ def is_true(v: str) -> bool:
 def keep_row(row: dict, min_confidence: str | None) -> bool:
     if str(row.get("error") or "").strip():
         return False
-    if not is_true(row.get("has_problem", "")):
-        return False
     dim = str(row.get("problem_dimension") or "").strip().lower()
+    is_clean = dim == "clean"
+    if not is_clean and not is_true(row.get("has_problem", "")):
+        return False
     if dim in ("", "none"):
         return False
     if not str(row.get("problem_text") or "").strip():

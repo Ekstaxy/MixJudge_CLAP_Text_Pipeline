@@ -1,34 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-L2 style transfer — L1 structured records → Amateur/Expert dialogue (+ problem_state_text).
+L2 style transfer — LEXICON_BRIEF L1 captions → Amateur/Expert dialogue.
 
-Pipeline (current):
-  1. Read L1 JSONL (mock or future export): axis / dimension / subject / source / texts.L1
-  2. Style pool = outputs/labeled_turns_gguf_all_problems.csv (FULL pool; no confidence filter)
-  3. For each L1 row, randomly sample same-dimension MixAssist turns as style exemplars
-     (prefer single-dim turns; skip turns that also carry competing dims when possible)
-  4. Generate under two orthogonal axes (fixed low temperature for prompt adherence):
-       mode:             retarget | strict | free   (rewrite policy)
-       exemplar_content: problem_text | raw         (what MixAssist text is fed)
+Pipeline:
+  1. Build L1 captions from quality_from_manual (or load --l1 JSONL)
+  2. Style pool = outputs/labeled_turns_gguf_all_problems.csv
+  3. For each L1 row, randomly sample same-dimension MixAssist turns
+     (no competing-dim gate; empty pool still generates from the caption)
+  4. Generate retarget | strict | free (low temp except free)
   5. Model returns JSON: amateur, expert, problem_state_text
 
-Caveats:
-  - Dimension/axis follow MixJudge note + all_problems (14 signed dims). No phase.
-  - Do NOT use labeled_turns_gguf_train.csv as the style pool (includes none/fix noise).
-  - Exemplars often say guitar/drums; prompts must retarget to L1 source/subject.
-  - muddy L1 should be bed-subject (carried-by), not vocal-only anchors.
-  - Temperature is fixed low; looseness comes from --modes, not from temp.
-
 Usage (from repo root):
-  for content in problem_text raw; do
-    python src/generate_l2_style.py --modes retarget strict free \\
-      --exemplar-content "$content" --overwrite
-  done
-  python src/generate_l2_style.py --modes retarget --exemplar-content raw --dry-run --limit 1
+  python src/generate_l2_style.py --modes retarget strict free \\
+    --exemplar-content raw --n-per-dim 20 --overwrite
+  python src/generate_l2_style.py --modes retarget --dry-run --limit 1
+  python src/generate_l2_style.py --dims clean --modes free --n-per-dim 20
 
 Output:
-  outputs/l2_from_l1_{mode}_{exemplar_content}.csv (+ _raw.jsonl)
-  e.g. l2_from_l1_retarget_raw.csv, l2_from_l1_free_problem_text.csv
+  {output-dir}/l2_from_l1_{mode}_{exemplar_content}.csv (+ _raw.jsonl)
 """
 
 from __future__ import annotations
@@ -43,9 +32,18 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+_SRC_ROOT = Path(__file__).resolve().parent
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
 from labeling.labeling_gguf import (  # noqa: E402
     DEFAULT_GGUF,
     load_llm,
+    parse_tensor_split,
+)
+from labeling.labeling_common import (  # noqa: E402
+    DIMENSION_TO_AXIS,
+    normalize_dimension,
 )
 from prompts.l2_generation_prompt import (  # noqa: E402
     VALID_EXEMPLAR_CONTENTS,
@@ -53,9 +51,14 @@ from prompts.l2_generation_prompt import (  # noqa: E402
     build_user_prompt,
     system_prompt_for_mode,
 )
+from prompts.lexicon_slots import (  # noqa: E402
+    PROBLEM_DIMS,
+    build_l1_records,
+    resolve_quality_json,
+    write_l1_jsonl,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_L1 = PROJECT_ROOT / "data" / "l1_mock_records.jsonl"
 DEFAULT_POOL = PROJECT_ROOT / "outputs" / "labeled_turns_gguf_all_problems.csv"
 DEFAULT_OUT_DIR = PROJECT_ROOT / "outputs"
 
@@ -64,8 +67,10 @@ TOP_K = 64
 MAX_TOKENS = 768
 N_CTX = 4096
 
-# Single fixed temperature so all modes follow prompt rules (not a third experiment axis).
+# Retarget/strict stay low so they follow copy/shape rules.
+# Free is higher so paraphrases actually vary (0.1 collapsed to "I feel like…").
 FIXED_TEMPERATURE = 0.1
+FREE_TEMPERATURE = 0.8
 
 OUTPUT_FIELDS = [
     "l1_segment_id",
@@ -160,12 +165,15 @@ def load_pool(path: Path) -> list[dict]:
         rows = list(csv.DictReader(f))
     kept = []
     for r in rows:
-        dim = (r.get("problem_dimension") or "").strip().lower()
+        dim = normalize_dimension(r.get("problem_dimension"))
         text = (r.get("problem_text") or "").strip()
-        if not dim or dim == "none" or not text:
+        if dim == "none" or not text:
             continue
-        if dim == "phase":
+        if dim not in DIMENSION_TO_AXIS:
             continue
+        r = dict(r)
+        r["problem_dimension"] = dim
+        r["problem_axis"] = DIMENSION_TO_AXIS[dim]
         kept.append(r)
     return kept
 
@@ -178,9 +186,12 @@ def load_l1_records(path: Path) -> list[dict]:
             if not line:
                 continue
             obj = json.loads(line)
-            dim = (obj.get("dimension") or "").strip().lower()
-            if not dim or dim == "phase":
+            dim = normalize_dimension(obj.get("dimension"))
+            if dim == "none" or dim not in DIMENSION_TO_AXIS:
                 continue
+            obj = dict(obj)
+            obj["dimension"] = dim
+            obj["axis"] = DIMENSION_TO_AXIS[dim]
             rows.append(obj)
     return rows
 
@@ -218,23 +229,11 @@ def pick_exemplars(
     top_k: int = 12,
     dims_by_turn: dict[str, set[str]] | None = None,
 ) -> list[dict]:
-    """Random same-dim exemplars. Prefer turns with only target_dim (no competing labels).
-
-    Gate A: if the MixAssist turn also carries other problem_dimensions, skip it when
-    any single-dim turn exists for target_dim. Falls back to multi-dim turns only when
-    the pool has no clean turn for that dim. Still random among the allowed set (--seed).
-    """
-    del target_source, top_k  # kept for call-site compat; unused
-    if not candidates:
+    """Random same-dim MixAssist turns. No competing-dim gate; shuffle and take n."""
+    del target_source, target_dim, top_k, dims_by_turn
+    if not candidates or n <= 0:
         return []
     cands = candidates[:]
-    td = (target_dim or "").strip().lower()
-    if td and dims_by_turn is not None:
-        clean = [
-            r for r in cands if dims_by_turn.get(turn_key(r), set()) == {td}
-        ]
-        if clean:
-            cands = clean
     rng.shuffle(cands)
     seen: set[str] = set()
     picked: list[dict] = []
@@ -259,7 +258,7 @@ def l1_to_input_obj(rec: dict) -> dict:
         "dim": (rec.get("dimension") or "").strip().lower(),
         "subject": (rec.get("subject") or "").strip().lower(),
         "source": (rec.get("source") or "").strip().lower(),
-        "severity": (rec.get("severity") or "medium").strip().lower(),
+        "severity": (rec.get("severity") or "").strip().lower(),
         "l1": l1,
     }
 
@@ -307,6 +306,44 @@ def call_generate(llm, system_prompt: str, user_message: str, temperature: float
         response_format={"type": "json_object"},
     )
     return (resp["choices"][0]["message"]["content"] or "").strip()
+
+
+def drop_segment_ids(csv_path: Path, jsonl_path: Path, segment_ids: set[str]) -> int:
+    """Remove existing rows for this batch so --dims clean does not wipe other dims."""
+    dropped = 0
+    if csv_path.exists() and segment_ids:
+        with csv_path.open(encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        kept = [
+            r
+            for r in rows
+            if (r.get("l1_segment_id") or "").strip() not in segment_ids
+        ]
+        dropped = len(rows) - len(kept)
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
+            w.writeheader()
+            for r in kept:
+                w.writerow({k: r.get(k, "") for k in OUTPUT_FIELDS})
+    if jsonl_path.exists() and segment_ids:
+        kept_raw = []
+        with jsonl_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    kept_raw.append(line)
+                    continue
+                if (obj.get("l1_segment_id") or "").strip() in segment_ids:
+                    continue
+                kept_raw.append(line)
+        with jsonl_path.open("w", encoding="utf-8") as f:
+            for line in kept_raw:
+                f.write(line + "\n")
+    return dropped
 
 
 def purge_error_rows(path: Path) -> int:
@@ -373,11 +410,15 @@ def run_mode(
 ) -> int:
     tag_prefix = variant_tag(mode, exemplar_content)
     raw_jsonl = out_csv.with_name(out_csv.stem + "_raw.jsonl")
+    batch_ids = {(rec.get("segment_id") or "").strip() for rec in l1_rows}
+    batch_ids.discard("")
     if overwrite:
-        for p in (out_csv, raw_jsonl):
-            if p.exists():
-                p.unlink()
-                print(f"[{tag_prefix}] --overwrite: deleted {p.name}")
+        dropped = drop_segment_ids(out_csv, raw_jsonl, batch_ids)
+        if dropped:
+            print(
+                f"[{tag_prefix}] --overwrite: dropped {dropped} existing row(s) "
+                f"for this batch (other dims kept)"
+            )
     else:
         removed = purge_error_rows(out_csv)
         if removed:
@@ -402,32 +443,6 @@ def run_mode(
         dim = input_obj["dim"]
         l1_text = input_obj.get("l1") or ""
         cands = by_dim.get(dim, [])
-        if not cands:
-            failures += 1
-            row = {
-                "l1_segment_id": seg_id,
-                "l1_text": l1_text,
-                "gold_axis": input_obj["axis"],
-                "gold_dim": dim,
-                "gold_subject": input_obj["subject"],
-                "source_instrument": input_obj["source"],
-                "severity": input_obj["severity"],
-                "style_mode": mode,
-                "exemplar_content": exemplar_content,
-                "temperature": temperature,
-                **pack_exemplar_fields([]),
-                "input_json": json.dumps(input_obj, ensure_ascii=False),
-                "amateur_text": "",
-                "expert_text": "",
-                "generated_dialogue": "",
-                "problem_state_text": "",
-                "error": f"no_style_pool for dim={dim}",
-            }
-            if not dry_run:
-                append_row(out_csv, row)
-            print(f"{tag} ERROR: no style pool for dim={dim}")
-            continue
-
         # Per-record RNG: same seed + segment → same exemplars across modes.
         row_rng = random.Random(f"{seed}|{seg_id}|{dim}|{n_exemplars}")
         exemplars = pick_exemplars(
@@ -438,6 +453,8 @@ def run_mode(
             target_dim=dim,
             dims_by_turn=dims_by_turn,
         )
+        if not exemplars:
+            print(f"{tag} no MixAssist exemplars for dim={dim}; generating from L1 caption")
         user_prompt = build_user_prompt(
             input_obj,
             exemplars,
@@ -526,13 +543,52 @@ def run_mode(
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "L2 from L1 + MixAssist style pool "
-            "(modes × exemplar_content; fixed low temperature)"
+            "L2 from LEXICON_BRIEF L1 captions + MixAssist style pool "
+            "(modes × exemplar_content; free uses a higher temperature)"
         )
     )
-    parser.add_argument("--l1", type=Path, default=DEFAULT_L1)
+    parser.add_argument(
+        "--l1",
+        type=Path,
+        default=None,
+        help="optional L1 JSONL; default: build captions from quality_from_manual",
+    )
     parser.add_argument("--pool", type=Path, default=DEFAULT_POOL)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--quality-json",
+        type=Path,
+        default=None,
+        help=(
+            "quality_from_manual.json. Default: "
+            "outputs/quality_from_manual/quality_from_manual.json, "
+            "else outputs/quality_from_manual.json"
+        ),
+    )
+    parser.add_argument(
+        "--n-per-dim",
+        type=int,
+        default=20,
+        help="L1 captions per problem dimension when building from lexicon (default 20)",
+    )
+    parser.add_argument(
+        "--dims",
+        nargs="+",
+        choices=list(PROBLEM_DIMS),
+        default=None,
+        help="subset of dims (default: all 12, including clean). Example: --dims clean",
+    )
+    parser.add_argument(
+        "--id-prefix",
+        default="lex",
+        help="segment_id prefix for built-in L1 rows (default lex; use lex_topup for refill)",
+    )
+    parser.add_argument(
+        "--index-offset",
+        type=int,
+        default=0,
+        help="starting index in segment_id (default 0; top-up can use 20)",
+    )
     parser.add_argument(
         "--modes",
         nargs="+",
@@ -550,7 +606,13 @@ def main() -> None:
         "--temperature",
         type=float,
         default=FIXED_TEMPERATURE,
-        help=f"Shared temperature for all modes (default {FIXED_TEMPERATURE})",
+        help=f"Temperature for retarget/strict (default {FIXED_TEMPERATURE})",
+    )
+    parser.add_argument(
+        "--free-temperature",
+        type=float,
+        default=FREE_TEMPERATURE,
+        help=f"Temperature for free mode only (default {FREE_TEMPERATURE})",
     )
     parser.add_argument(
         "--n-exemplars",
@@ -563,11 +625,28 @@ def main() -> None:
         "--seed",
         type=int,
         default=123,
-        help="Exemplar sampling seed (default 123; change to reshuffle MixAssist refs)",
+        help="Caption + exemplar sampling seed (default 123)",
     )
     parser.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
     parser.add_argument("--n-ctx", type=int, default=N_CTX)
+    parser.add_argument(
+        "--n-batch",
+        type=int,
+        default=512,
+        help="llama.cpp n_batch (OOM → try 256)",
+    )
     parser.add_argument("--n-gpu-layers", type=int, default=-1)
+    parser.add_argument(
+        "--tensor-split",
+        type=parse_tensor_split,
+        default=None,
+        help="Multi-GPU proportions, e.g. 0.5,0.5. Off by default (single GPU).",
+    )
+    parser.add_argument(
+        "--no-tensor-split",
+        action="store_true",
+        help="Force no tensor_split (already the default)",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
@@ -577,35 +656,67 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.l1.is_file():
-        sys.exit(f"找不到 L1: {args.l1}")
     if not args.pool.is_file():
         sys.exit(f"找不到 pool: {args.pool}")
 
-    l1_rows = load_l1_records(args.l1)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.l1 is not None:
+        if not args.l1.is_file():
+            sys.exit(f"找不到 L1: {args.l1}")
+        l1_rows = load_l1_records(args.l1)
+        print(f"L1 records: {len(l1_rows)} from {args.l1}")
+    else:
+        try:
+            quality_json = resolve_quality_json(args.quality_json)
+        except FileNotFoundError as e:
+            sys.exit(str(e))
+        l1_rows = build_l1_records(
+            args.n_per_dim,
+            args.seed,
+            dims=args.dims,
+            id_prefix=args.id_prefix,
+            index_offset=args.index_offset,
+            quality_json=quality_json,
+        )
+        audit = args.output_dir / f"l1_lexicon_captions_{args.id_prefix}.jsonl"
+        write_l1_jsonl(audit, l1_rows)
+        print(
+            f"L1 records: {len(l1_rows)} built from {quality_json} "
+            f"(n_per_dim={args.n_per_dim}, prefix={args.id_prefix}) → {audit}"
+        )
     if args.limit is not None:
         l1_rows = l1_rows[: args.limit]
     pool = load_pool(args.pool)
     by_dim = index_pool_by_dim(pool)
     dims_by_turn = index_dims_by_turn(pool)
 
-    print(f"L1 records: {len(l1_rows)} from {args.l1.name}")
-    print(f"Style pool: {len(pool)} rows from {args.pool.name} (no confidence filter)")
-    print(f"exemplar_content={args.exemplar_content}  temperature={args.temperature}")
-    print("Pool coverage (rows / single-dim turns preferred by gate A):")
-    for dim in sorted(by_dim):
-        turns = {turn_key(r) for r in by_dim[dim]}
-        single = sum(1 for t in turns if dims_by_turn.get(t) == {dim})
-        print(f"  {dim:<22} {len(by_dim[dim]):>4} rows  {single:>3}/{len(turns)} single-dim turns")
-    missing = sorted(
-        {(r.get("dimension") or "").strip().lower() for r in l1_rows} - set(by_dim)
+    print(f"Style pool: {len(pool)} rows from {args.pool} (no confidence filter)")
+    print(
+        f"exemplar_content={args.exemplar_content}  "
+        f"temp retarget/strict={args.temperature}  free={args.free_temperature}"
     )
+    print("Pool coverage (random same-dim sampling; empty pool still generates):")
+    l1_dims = {(r.get("dimension") or "").strip().lower() for r in l1_rows}
+    for dim in sorted(l1_dims | set(by_dim)):
+        rows_n = len(by_dim.get(dim, []))
+        turns = {turn_key(r) for r in by_dim.get(dim, [])}
+        print(f"  {dim:<22} {rows_n:>4} rows  {len(turns):>3} turns")
+    missing = sorted(l1_dims - set(by_dim))
     if missing:
-        print(f"WARNING: L1 dims with empty pool: {missing}")
+        print(f"NOTE: L1 dims with empty MixAssist pool (caption-only): {missing}")
 
     llm = None
     if not args.dry_run:
-        llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+        llm = load_llm(
+            args.model_path,
+            args.n_ctx,
+            args.n_gpu_layers,
+            args.verbose,
+            n_batch=args.n_batch,
+            tensor_split=args.tensor_split,
+            disable_tensor_split=args.no_tensor_split,
+        )
 
     total_fail = 0
     written: list[Path] = []
@@ -619,14 +730,15 @@ def main() -> None:
                 f"(was {n_ex}; retarget rewrites a single MixAssist turn)"
             )
             n_ex = 1
+        temp = args.free_temperature if mode == "free" else args.temperature
         print(
             f"\n=== mode={mode} exemplar_content={args.exemplar_content} "
-            f"temp={args.temperature} → {out_csv.name} ==="
+            f"temp={temp} → {out_csv.name} ==="
         )
         total_fail += run_mode(
             mode=mode,
             exemplar_content=args.exemplar_content,
-            temperature=args.temperature,
+            temperature=temp,
             l1_rows=l1_rows,
             by_dim=by_dim,
             dims_by_turn=dims_by_turn,

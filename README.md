@@ -45,7 +45,7 @@ MixAssist CSV (train / validation / test)
 | **L2** | 真實混音對話風格的問題描述（retrieval + style transfer） | 進行中 |
 | **L3** | L2 + 同 turn 的自然 fix 用語 | 後續 |
 
-標註詞彙為 **8 axes × signed dimensions**（如 `level` / `too_loud`、`body` / `muddy`），外加 `phase` 與 `none`。詳見 [`labeling_pipeline.md`](labeling_pipeline.md)。
+標註詞彙為 MixJudge **7 axes / 12 classes**（11 problem + `clean`；見 [`LEXICON_BRIEF.md`](LEXICON_BRIEF.md)）。`none` 表示無法從 CURRENT TURN 區分。
 
 ---
 
@@ -57,6 +57,8 @@ MixAssist CSV (train / validation / test)
 ├── .gitignore
 ├── Labeling_Flow_Chart.png
 ├── labeling_pipeline.md
+├── LEXICON_BRIEF.md
+├── Lexicon_and_L2_Generation.md
 ├── label_stats.md
 ├── generation_note.md
 ├── intern_chores.md
@@ -64,18 +66,23 @@ MixAssist CSV (train / validation / test)
 │   ├── export_problem_pool.py
 │   ├── analyze_labels.py
 │   ├── analyze_vocal.py
-│   └── compare_l2_labels.py
+│   ├── compare_l2_labels.py
+│   ├── filter_l2_by_relabel.py
+│   └── run_l2_raw_variants.sh
 └── src/
     ├── labeling/
     │   ├── labeling_common.py    # schema / I/O / parse / normalize
     │   ├── labeling_hf.py        # Hugging Face transformers
-    │   ├── labeling_gguf.py      # llama.cpp GGUF
+    │   ├── labeling_gguf.py      # llama.cpp GGUF (single GPU)
     │   ├── labeling_groq.py      # Groq API
     │   └── label_l2_generated.py # re-label L2 dialogues (consistency check)
     ├── prompts/
     │   ├── labeling_prompt.py
-    │   └── l2_generation_prompt.py
-    └── generate_l2_style.py
+    │   ├── l2_generation_prompt.py
+    │   ├── lexicon_slots.py
+    │   └── term_extract_prompt.py
+    ├── generate_l2_style.py
+    └── term_extract.py
 ```
 
 > 大型資料（`*.csv`、`outputs/`、`models/*.gguf`、音訊等）已列在 `.gitignore`，不會出現在 GitHub。本地需自行準備 MixAssist split CSV 與模型權重。
@@ -93,9 +100,10 @@ MixAssist CSV (train / validation / test)
 | `src/labeling/labeling_groq.py` | 雲端 API 推論，方便快速試 prompt / 比模型 |
 | `scripts/export_problem_pool.py` | 過濾有效 problem 列，寫出 `*_problems.csv` 與 `*_all_problems.csv` |
 | `scripts/analyze_labels.py` | 覆蓋率、axis / dimension 分佈、抽樣檢視 |
-| `src/generate_l2_style.py` | 以 problem pool 為 gold + few-shot，生成 Amateur / Expert 對話 |
-| `src/labeling/label_l2_generated.py` | 對 L2 生成對話再跑 labeling（同 GGUF / prompt），輸出 `labeled_l2_gguf_{mode}.csv` |
+| `src/generate_l2_style.py` | LEXICON_BRIEF L1 captions + MixAssist style pool → Amateur / Expert 對話 |
+| `src/labeling/label_l2_generated.py` | 對 L2 生成對話再跑 labeling（同 GGUF / prompt），輸出 `labeled_l2_gguf_{mode}_raw.csv` |
 | `scripts/compare_l2_labels.py` | 比對 L1 gold vs 再標結果，輸出 dim / axis 一致率 |
+| `scripts/filter_l2_by_relabel.py` | 留下 dim_any 命中列 → `l2_from_l1_{mode}_raw_kept.csv` |
 
 ---
 
@@ -104,6 +112,8 @@ MixAssist CSV (train / validation / test)
 | 文件 | 說明 |
 |------|------|
 | [`labeling_pipeline.md`](labeling_pipeline.md) | 標註管線設計：上下文、JSON schema、正規化、L2 pool 匯出 |
+| [`LEXICON_BRIEF.md`](LEXICON_BRIEF.md) | MixJudge 11 dim 本體、必須可區分的 pair、caption QUALITY 用詞 |
+| [`Lexicon_and_L2_Generation.md`](Lexicon_and_L2_Generation.md) | lexicon 抽取 → Quality Lexicon → L1/L2 生成與 relabel filter |
 | [`label_stats.md`](label_stats.md) | 全量標註後的 coverage 與 axis / dimension 統計 |
 | [`generation_note.md`](generation_note.md) | L2 生成的輸入輸出與 style prompt 構想 |
 | [`intern_chores.md`](intern_chores.md) | 背景目標、L1/L2/L3、早期 9-key 規劃與 Phase checklist |
@@ -119,9 +129,14 @@ MixAssist CSV (train / validation / test)
 - 輸出：`outputs/`
 
 ```bash
-# 1) 標註（本地 GGUF）
-python src/labeling/labeling_gguf.py --splits train --limit 5   # 小量測試
-python src/labeling/labeling_gguf.py                            # 全量
+# 全套（label → pool → generate → relabel → compare → filter）
+# MixAssist 用 --overwrite，因為 prompt 已換成 LEXICON_BRIEF 12-class。
+bash scripts/run_l2_raw_variants.sh
+# 已用新 prompt 標過 MixAssist 時：SKIP_LABEL=1 bash scripts/run_l2_raw_variants.sh
+
+# 或分步：
+# 1) MixAssist 標註（src/prompts/labeling_prompt.py）
+python src/labeling/labeling_gguf.py --n-batch 512 --overwrite
 
 # 2) 匯出 L2 problem pool
 python scripts/export_problem_pool.py
@@ -129,18 +144,19 @@ python scripts/export_problem_pool.py
 # 3) 統計
 python scripts/analyze_labels.py
 
-# 4) L2 生成（pilot）— 固定 temp=0.1；只用 MixAssist raw；鬆緊靠 mode
-python src/generate_l2_style.py --modes retarget strict free \
-  --exemplar-content raw --n-exemplars 1 --overwrite
-# 或一次跑完 generate + re-label + compare:
-bash scripts/run_l2_raw_variants.sh
+# 4) L2 生成
+python src/generate_l2_style.py \
+  --l1 new_outputs/l1_lexicon_captions_lex.jsonl \
+  --pool outputs/labeled_turns_gguf_all_problems.csv \
+  --modes retarget strict free \
+  --exemplar-content raw --n-exemplars 1 --n-batch 512 --overwrite
 
-# 5) 對生成對話再標註（驗證是否仍符合 L1 axis/dim）
+# 5) 對生成對話再標註（同一套 labeling prompt）
 python src/labeling/label_l2_generated.py \
   --inputs outputs/l2_from_l1_retarget_raw.csv \
            outputs/l2_from_l1_strict_raw.csv \
            outputs/l2_from_l1_free_raw.csv \
-  --overwrite
+  --output-dir outputs --n-batch 512 --overwrite
 
 # 6) 比對 gold vs 再標一致率
 for mode in retarget strict free; do
@@ -150,6 +166,9 @@ for mode in retarget strict free; do
     --labeled "outputs/labeled_l2_gguf_${tag}.csv" \
     --report "outputs/l2_label_agreement_${tag}.md"
 done
+
+# 7) 過濾 dim_any 命中列
+python scripts/filter_l2_by_relabel.py --output-dir outputs --min-keep 10
 ```
 
 Groq 版需設定 `GROQ_API_KEY` 後執行 `python src/labeling/labeling_groq.py`。

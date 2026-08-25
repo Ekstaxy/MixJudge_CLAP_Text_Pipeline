@@ -3,20 +3,20 @@
 L2 generation consistency check — re-label generated Amateur/Expert dialogue
 with the same MixAssist labeling prompt + GGUF model.
 
-Input:  outputs/l2_from_l1_{mode}_{exemplar_content}.csv
-Output: outputs/labeled_l2_gguf_{mode}_{exemplar_content}.csv (+ _raw.jsonl)
+Input:  outputs/l2_from_l1_{mode}_raw.csv
+Output: outputs/labeled_l2_gguf_{mode}_raw.csv (+ _raw.jsonl)
 
 Uses the same SYSTEM_PROMPT / OUTPUT_FIELDS as MixAssist labeling.
 Gold axis/dim are NOT fed to the model (only source_instrument as TOPIC).
 
 Usage (from repo root):
-  # label all 6 variants present under outputs/
-  python src/labeling/label_l2_generated.py --overwrite
+  python src/labeling/label_l2_generated.py --overwrite --n-batch 512
 
   python src/labeling/label_l2_generated.py \\
     --inputs outputs/l2_from_l1_retarget_raw.csv \\
              outputs/l2_from_l1_strict_raw.csv \\
-             outputs/l2_from_l1_free_raw.csv
+             outputs/l2_from_l1_free_raw.csv \\
+    --output-dir outputs --n-batch 512
 
 Then compare:
   python scripts/compare_l2_labels.py \\
@@ -38,10 +38,12 @@ if str(_SRC_ROOT) not in sys.path:
 
 from labeling.labeling_gguf import (  # noqa: E402
     DEFAULT_GGUF,
+    N_BATCH,
     N_CTX,
     N_GPU_LAYERS,
     call_llm,
     load_llm,
+    parse_tensor_split,
 )
 from labeling.labeling_common import (  # noqa: E402
     PROJECT_ROOT,
@@ -60,8 +62,7 @@ VALID_MODES = ("retarget", "strict", "free")
 VALID_CONTENTS = ("problem_text", "raw")
 
 DEFAULT_INPUTS = [
-    PROJECT_ROOT / "outputs" / f"l2_from_l1_{mode}_{content}.csv"
-    for content in VALID_CONTENTS
+    PROJECT_ROOT / "outputs" / f"l2_from_l1_{mode}_raw.csv"
     for mode in VALID_MODES
 ]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs"
@@ -148,13 +149,30 @@ def main() -> None:
         nargs="+",
         type=Path,
         default=None,
-        help="L2 CSV paths (default: existing outputs/l2_from_l1_{mode}_{content}.csv)",
+        help="L2 CSV paths (default: existing outputs/l2_from_l1_{mode}_raw.csv)",
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--model-path", type=Path, default=DEFAULT_GGUF)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--n-ctx", type=int, default=N_CTX)
+    parser.add_argument(
+        "--n-batch",
+        type=int,
+        default=N_BATCH,
+        help=f"llama.cpp n_batch (default {N_BATCH}; OOM → try 256)",
+    )
     parser.add_argument("--n-gpu-layers", type=int, default=N_GPU_LAYERS)
+    parser.add_argument(
+        "--tensor-split",
+        type=parse_tensor_split,
+        default=None,
+        help="Multi-GPU proportions, e.g. 0.5,0.5. Off by default (single GPU).",
+    )
+    parser.add_argument(
+        "--no-tensor-split",
+        action="store_true",
+        help="Force no tensor_split (already the default on this branch)",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -195,7 +213,15 @@ def main() -> None:
     if not by_variant:
         sys.exit("沒有可標註的 L2 對話。")
 
-    llm = load_llm(args.model_path, args.n_ctx, args.n_gpu_layers, args.verbose)
+    llm = load_llm(
+        args.model_path,
+        args.n_ctx,
+        args.n_gpu_layers,
+        args.verbose,
+        n_batch=args.n_batch,
+        tensor_split=args.tensor_split,
+        disable_tensor_split=args.no_tensor_split,
+    )
     failures: list[tuple] = []
     written: list[Path] = []
 

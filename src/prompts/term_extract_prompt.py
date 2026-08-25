@@ -2,8 +2,8 @@
 """Blind term extraction prompts for MixAssist lexicon building.
 
 IMPORTANT (for human review):
-  This prompt must NOT mention the 8 mixing axes (level / body / brightness /
-  space / dynamic / masking / stereo / phase) or any signed dimensions.
+  This prompt must NOT mention the MixJudge axes/dims (level / body /
+  brightness / space / dynamic / masking / clean, or the 12 classes).
   The model only dumps free-form (target, desc) pairs.
 """
 
@@ -42,8 +42,6 @@ WHAT NOT TO EXTRACT
 - Musical arrangement / songwriting preference with no mix-sound claim.
 - Vague acknowledgements ("yeah", "sounds good") unless they name a
   concrete sonic quality.
-- Any descriptions that only state general approval or disapproval (e.g., "sounds good", "this is fine", "perfect", "balanced", "not loving") 
-  lacking concrete sonic details.
 
 TARGET
 - Prefer a concrete instrument or bus: vocal, kick, snare, bass, guitar,
