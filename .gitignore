@@ -31,3 +31,4 @@ venv/
 .vscode/
 # 執行產物（若還沒被 outputs/* 蓋到）
 *.log
+usable_file/*
